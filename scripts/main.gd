@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.4"
+const VERSION = "1.0.5"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -35,7 +35,7 @@ const SHIP_R = 3.4
 var BASE_SPEED = 41.25
 
 
-var AB_PCT = 150.0
+var AB_PCT = 200.0
 var SLOW_PCT = 50.0
 var BOOST_SPEED = 61.875
 var BRAKE_SPEED = 20.625
@@ -1346,6 +1346,7 @@ func _place_me(angle: float) -> void:
 
 
 func _clear_action() -> void:
+	_clear_buffs()
 	for sh in shots:
 		sh.n.queue_free()
 	shots.clear()
@@ -1630,6 +1631,7 @@ func _process(dt: float) -> void:
 	_tick_towers(dt)
 	_tick_comm(dt)
 	_tick_ace_beams(dt)
+	_tick_buffs(dt)
 	_tick_fx(dt)
 	_camera(dt)
 	hit_t -= dt
@@ -1953,15 +1955,18 @@ func _local_flight(dt: float) -> void:
 	if firing and volley_left == 0 and volley_cd <= 0.0:
 		volley_left = VOLLEY_SHOTS
 		volley_t = 0.0
-		volley_cd = VOLLEY_PERIOD
+		volley_cd = VOLLEY_PERIOD * _gun_k(my_id)
 		if sfx_volley != null:
+			var pw = has_buff(my_id, BUFF_POWER)
+			sfx_player.pitch_scale = POWER_PITCH if pw else 1.0
+			sfx_player.volume_db = -1.0 if pw else -4.0
 			sfx_player.play()
 		rpc("fx_volley")
 	if volley_left > 0:
 		volley_t -= dt
 		while volley_t <= 0.0 and volley_left > 0:
 			volley_left -= 1
-			volley_t += VOLLEY_GAP
+			volley_t += VOLLEY_GAP * _gun_k(my_id)
 			var b = s.basis
 			var dir = -b.z
 			fire_side = -fire_side
@@ -2277,6 +2282,9 @@ func fx_volley() -> void:
 		pl.max_distance = 600.0
 		pl.volume_db = -3.0
 		sh.add_child(pl)
+	var pw = has_buff(multiplayer.get_remote_sender_id(), BUFF_POWER)
+	pl.pitch_scale = POWER_PITCH if pw else 1.0
+	pl.volume_db = 0.0 if pw else -3.0
 	pl.play()
 
 
@@ -2317,6 +2325,8 @@ func _spawn_shot(p: Vector3, dir: Vector3, owner_id: int, rocket: bool = false) 
 	var v = dir.normalized() * LASER_SPEED
 	var life = LASER_LIFE
 	var dmg = LASER_DMG
+	var arcs = []
+	var swarm = false
 	if rocket:
 
 		n = Node3D.new()
@@ -2325,7 +2335,14 @@ func _spawn_shot(p: Vector3, dir: Vector3, owner_id: int, rocket: bool = false) 
 			col = Color(1.0, 0.15, 0.6)
 		if players.has(owner_id):
 			col = COLORS[players[owner_id].col]
-		Lib.missile_model(n, col, true)
+		swarm = players.has(owner_id) and has_buff(owner_id, BUFF_SWARM)
+		if swarm:
+			var body = Node3D.new()
+			body.scale = Vector3.ONE * 1.3
+			n.add_child(body)
+			Lib.missile_model(body, Color(1.0, 0.45, 0.15), true)
+		else:
+			Lib.missile_model(n, col, true)
 		v = dir.normalized() * ROCKET_SPEED
 		life = ROCKET_LIFE
 		_sfx_missile(owner_id, p)
@@ -2362,6 +2379,13 @@ func _spawn_shot(p: Vector3, dir: Vector3, owner_id: int, rocket: bool = false) 
 			fleck.position = Vector3(0, 0.55, 1.1)
 			fleck.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			spin.add_child(fleck)
+			if has_buff(owner_id, BUFF_POWER):
+				# OVERCHARGE: bigger, white-hot electric bolts with crackling arcs, 50% more damage
+				dmg = int(round(LASER_DMG * POWER_DMG_K))
+				oval.material_override = _glow_mat("power_oval", Color(0.55, 0.9, 1.0), 9.0)
+				oval.scale = Vector3(1.5, 0.95, 2.6)
+				fleck.material_override = _glow_mat("power_fleck", Color(1, 1, 1), 14.0)
+				arcs = _make_arcs(spin)
 	add_child(n)
 	Lib.face(n, p, dir)
 	if owner_id == 0:
@@ -2369,7 +2393,7 @@ func _spawn_shot(p: Vector3, dir: Vector3, owner_id: int, rocket: bool = false) 
 
 	if not rocket and (owner_id == 0 or owner_id <= ENEMY_BASE) and not sfx_enemy_lasers.is_empty():
 		_sfx(sfx_enemy_lasers[randi() % sfx_enemy_lasers.size()], -5.0, p)
-	shots.append({"n": n, "p": p, "o": p, "v": v, "life": life, "owner": owner_id, "dmg": dmg, "rocket": rocket, "trail": 0.0, "spin": spin})
+	shots.append({"n": n, "p": p, "o": p, "v": v, "life": life, "owner": owner_id, "dmg": dmg, "rocket": rocket, "trail": 0.0, "spin": spin, "arcs": arcs, "swarm": swarm, "mini": false, "age": 0.0, "tgt": null})
 
 
 func _tick_shots(dt: float) -> void:
@@ -2377,6 +2401,17 @@ func _tick_shots(dt: float) -> void:
 	var i = shots.size() - 1
 	while i >= 0:
 		var sh = shots[i]
+		if sh.arcs.size() > 0:
+			_crackle(sh.arcs)
+		if sh.swarm or sh.mini:
+			sh.age += dt
+			if sh.swarm and sh.age >= SWARM_SPLIT_T:
+				_swarm_split(sh)
+				sh.n.queue_free()
+				shots.remove_at(i)
+				i -= 1
+				continue
+			_home(sh, dt)
 		var p0 = sh.p
 		var p1 = p0 + sh.v * dt
 		var dead = false
@@ -2445,9 +2480,9 @@ func _tick_shots(dt: float) -> void:
 				else:
 					_impact_fx(p1, -sh.v.normalized(), sh.rocket, sh.owner == 0 or sh.owner <= ENEMY_BASE)
 			if sh.rocket:
-				_fireball(p1, 26.0)
+				_fireball(p1, 12.0 if sh.mini else 26.0)
 				if sh.owner == my_id or (is_host and sh.owner < 0 and sh.owner > ENEMY_BASE):
-					_splash(p1, sh.owner)
+					_splash(p1, sh.owner, SWARM_K if sh.mini else 1.0)
 			sh.n.queue_free()
 			shots.remove_at(i)
 		else:
@@ -2461,6 +2496,10 @@ func _tick_shots(dt: float) -> void:
 func _hit_kind(p0: Vector3, p1: Vector3) -> int:
 	var n_static = boss.static_solids.size()
 	for k in boss.solids.size():
+		# 1.0.5: the bubble over the datacenter roof hid the roof PDC from every shot; the roof
+		# itself is a box (static_boxes), so shots ignore that bubble.
+		if k == boss.dc_top_solid:
+			continue
 		var sol = boss.solids[k]
 		if Lib.seg_sphere(p0, p1, sol[0], sol[1]):
 			return 2 if k < n_static else 1
@@ -3190,8 +3229,10 @@ func _tick_fireballs(dt: float) -> void:
 
 
 
-func _splash(pos: Vector3, shooter: int) -> void:
+func _splash(pos: Vector3, shooter: int, k: float = 1.0) -> void:
 	var real = shooter == my_id
+	var sdmg = maxi(1, int(round(SPLASH_DMG * k)))
+	var srad = SPLASH_R * (0.6 if k < 1.0 else 1.0)
 	for id in ships:
 		if game_mode == MODE_DM:
 			if id == shooter or id <= ENEMY_BASE or not players.has(id):
@@ -3199,22 +3240,22 @@ func _splash(pos: Vector3, shooter: int) -> void:
 		elif id > ENEMY_BASE:
 			continue
 		var o = ships[id]
-		if o.alive and (o.has_net or id == my_id) and o.position.distance_to(pos) < SPLASH_R:
+		if o.alive and (o.has_net or id == my_id) and o.position.distance_to(pos) < srad:
 			if real:
-				_to_host("c_hit_player", [id, SPLASH_DMG])
+				_to_host("c_hit_player", [id, sdmg])
 			else:
-				_apply_hit_player(shooter, id, SPLASH_DMG)
+				_apply_hit_player(shooter, id, sdmg)
 	for i in boss.parts.size():
 		if (alive_mask & (1 << i)) == 0:
 			continue
 		var pt = boss.parts[i]
 		if pt.kind == Boss.WEAK and (active_mask & (1 << i)) == 0:
 			continue
-		if pt.pos.distance_to(pos) < SPLASH_R:
+		if pt.pos.distance_to(pos) < srad:
 			if real:
-				_to_host("c_hit_part", [i, SPLASH_DMG])
+				_to_host("c_hit_part", [i, sdmg])
 			else:
-				_apply_hit_part(shooter, i, SPLASH_DMG)
+				_apply_hit_part(shooter, i, sdmg)
 
 
 func _tick_fx(dt: float) -> void:
@@ -3850,6 +3891,7 @@ func _apply_hit_part(from: int, idx: int, dmg: int) -> void:
 				what = "point-defence cannon"
 			players[from].score += bonus
 			rpc("ev_blast", p.pos, 24.0 if p.bone >= 0 else 18.0)
+			_drop_buff(p.pos)
 			rpc("ev_feed", "%s blew up a %s  +%d" % [players[from].name, what, bonus])
 			if p.bone >= 0:
 
@@ -4148,6 +4190,8 @@ func _apply_hit_tower(from: int, i: int, dmg: int) -> void:
 			players[from].score += TOWER_BONUS
 		var tp = towers[i].part
 		if tp >= 0:
+			if part_alive[tp]:
+				_drop_buff(boss.parts[tp].pos)
 			part_alive[tp] = false
 			part_respawn[tp] = 100000.0
 			_recalc_masks()
@@ -4757,6 +4801,7 @@ func c_portrait(bytes: PackedByteArray) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func ev_death(victim: int, killer: int, why: int) -> void:
+	pbuffs.erase(victim)
 	var s = ships.get(victim)
 	if s != null:
 		var was_visible = s.alive and (victim == my_id or s.has_net)
@@ -4854,3 +4899,268 @@ func ev_missile_gone(mid: int) -> void:
 	_fireball(missiles[mid].p, 20.0)
 	missiles[mid].n.queue_free()
 	missiles.erase(mid)
+
+
+# ---- Buff pickups (standalone 1.0.5) ------------------------------------------------------
+# When a turret, missile pod or point-defence gun is destroyed in a boss hunt, the host drops one
+# of three buffs where it was. It floats and spins until a pilot flies through it. A buff lasts
+# BUFF_TIME seconds or until that pilot is shot down. Every machine knows who holds which buff
+# (ev_buff_taken), so the shots and sounds of other pilots look and sound the same everywhere;
+# damage is still decided by the shooter's own machine, as for every other shot.
+const BUFF_RAPID = 0
+const BUFF_POWER = 1
+const BUFF_SWARM = 2
+const BUFF_NAMES = ["RAPID FIRE", "OVERCHARGE", "SWARM MISSILES"]
+const BUFF_INFO = ["guns fire twice as fast", "guns hit 50% harder", "missiles split into 6 homing missiles"]
+const BUFF_COLS = [Color(1.0, 0.85, 0.2), Color(0.45, 0.9, 1.0), Color(1.0, 0.4, 0.15)]
+const BUFF_TIME = 45.0
+const BUFF_PICK_R = 16.0
+const POWER_DMG_K = 1.5
+const POWER_PITCH = 0.7
+const SWARM_SPLIT_T = 2.0
+const SWARM_COUNT = 6
+const SWARM_K = 0.25
+const SWARM_TURN = 3.2
+var world_buffs = {}
+var pbuffs = {}
+var buff_seq = 0
+var arc_mesh: BoxMesh
+
+
+func has_buff(pid: int, ty: int) -> bool:
+	return pbuffs.has(pid) and pbuffs[pid].get(ty, 0.0) > 0.0
+
+
+func _gun_k(pid: int) -> float:
+	return 0.5 if has_buff(pid, BUFF_RAPID) else 1.0
+
+
+func _drop_buff(pos: Vector3) -> void:
+	if not is_host or game_mode != MODE_BOSS or state != PLAYING:
+		return
+	buff_seq += 1
+	rpc("ev_buff_spawn", buff_seq, randi() % 3, Vector3(pos.x, maxf(pos.y, 16.0), pos.z))
+
+
+@rpc("authority", "call_local", "reliable")
+func ev_buff_spawn(bid: int, ty: int, pos: Vector3) -> void:
+	if state != PLAYING or world_buffs.has(bid) or ty < 0 or ty > 2:
+		return
+	var n = _buff_node(ty)
+	add_child(n)
+	n.position = pos
+	world_buffs[bid] = {"type": ty, "pos": pos, "n": n, "asked": 0.0}
+
+
+func _buff_node(ty: int) -> Node3D:
+	var col: Color = BUFF_COLS[ty]
+	var root = Node3D.new()
+	var spin = Node3D.new()
+	spin.name = "Spin"
+	root.add_child(spin)
+	var gem = MeshInstance3D.new()
+	var sm = SphereMesh.new()
+	sm.radius = 4.5
+	sm.height = 9.0
+	sm.radial_segments = 4
+	sm.rings = 2
+	gem.mesh = sm
+	gem.material_override = _glow_mat("buff%d" % ty, col, 4.0)
+	gem.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	spin.add_child(gem)
+	var core = MeshInstance3D.new()
+	core.mesh = pop_mesh
+	core.scale = Vector3.ONE * 2.2
+	core.material_override = _glow_mat("buff_core", Color(1, 1, 1), 8.0)
+	core.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	spin.add_child(core)
+	var ring = MeshInstance3D.new()
+	var tm = TorusMesh.new()
+	tm.inner_radius = 6.6
+	tm.outer_radius = 7.4
+	ring.mesh = tm
+	ring.material_override = _glow_mat("buff_ring%d" % ty, col, 3.0)
+	ring.rotation = Vector3(PI / 2.0, 0, 0)
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	spin.add_child(ring)
+	var lab = Label3D.new()
+	lab.text = BUFF_NAMES[ty]
+	lab.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	lab.font_size = 64
+	lab.pixel_size = 0.1
+	lab.outline_size = 14
+	lab.modulate = col
+	lab.position = Vector3(0, 11, 0)
+	root.add_child(lab)
+	var l = OmniLight3D.new()
+	l.light_color = col
+	l.omni_range = 30.0
+	l.light_energy = 2.0
+	l.shadow_enabled = false
+	root.add_child(l)
+	return root
+
+
+func _tick_buffs(dt: float) -> void:
+	var me = ships.get(my_id)
+	for bid in world_buffs.keys():
+		var b = world_buffs[bid]
+		var sp = b.n.get_node("Spin")
+		sp.rotation.y += 1.8 * dt
+		sp.rotation.x = 0.35
+		b.n.position = b.pos + Vector3(0, sin(t * 2.0 + bid) * 2.0, 0)
+		b.asked -= dt
+		if me != null and me.alive and state == PLAYING and players.has(my_id) and b.asked <= 0.0 and me.position.distance_to(b.n.position) < BUFF_PICK_R:
+			b.asked = 0.5
+			_to_host("c_buff_take", [bid])
+	for pid in pbuffs.keys():
+		for ty in pbuffs[pid].keys():
+			pbuffs[pid][ty] -= dt
+			if pbuffs[pid][ty] <= 0.0:
+				pbuffs[pid].erase(ty)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func c_buff_take(bid: int) -> void:
+	if not is_host:
+		return
+	var from = _sender()
+	if state != PLAYING or not world_buffs.has(bid) or not players.has(from) or not hostp.has(from) or not hostp[from].alive:
+		return
+	rpc("ev_buff_taken", bid, from, world_buffs[bid].type)
+
+
+@rpc("authority", "call_local", "reliable")
+func ev_buff_taken(bid: int, pid: int, ty: int) -> void:
+	if world_buffs.has(bid):
+		var b = world_buffs[bid]
+		_pop(b.n.position, 10.0, BUFF_COLS[clampi(ty, 0, 2)])
+		b.n.queue_free()
+		world_buffs.erase(bid)
+	if state != PLAYING or ty < 0 or ty > 2:
+		return
+	if not pbuffs.has(pid):
+		pbuffs[pid] = {}
+	pbuffs[pid][ty] = BUFF_TIME
+	if pid == my_id:
+		_say("%s!  %s for %d s" % [BUFF_NAMES[ty], BUFF_INFO[ty], int(BUFF_TIME)])
+	elif players.has(pid):
+		_say("%s picked up %s" % [players[pid].name, BUFF_NAMES[ty]])
+
+
+func _clear_buffs() -> void:
+	for bid in world_buffs:
+		world_buffs[bid].n.queue_free()
+	world_buffs.clear()
+	pbuffs.clear()
+
+
+# OVERCHARGE bolts: a few thin electric arcs that flicker to new angles every frame.
+func _make_arcs(parent: Node3D) -> Array:
+	if arc_mesh == null:
+		arc_mesh = BoxMesh.new()
+		arc_mesh.size = Vector3(0.12, 0.12, 1.0)
+	var out = []
+	for k in 4:
+		var a = MeshInstance3D.new()
+		a.mesh = arc_mesh
+		a.material_override = _glow_mat("power_arc", Color(0.7, 0.95, 1.0), 12.0)
+		a.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		parent.add_child(a)
+		out.append(a)
+	_crackle(out)
+	return out
+
+
+func _crackle(arcs: Array) -> void:
+	for a in arcs:
+		if randf() < 0.4:
+			a.visible = randf() < 0.8
+			var rot = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
+			var ln = randf_range(1.5, 3.8)
+			a.rotation = rot
+			a.scale = Vector3(1, 1, ln)
+			a.position = Basis.from_euler(rot) * Vector3(0, 0, ln * 0.5)
+
+
+# SWARM MISSILES: what a homing missile can chase. Boss hunt: pink aces and every live gun or
+# lit weak spot. Deathmatch (no buffs drop there, but just in case): the other pilots.
+func _swarm_targets(owner_id: int) -> Array:
+	var out = []
+	if game_mode == MODE_DM:
+		for id in ships:
+			if id != owner_id and players.has(id) and ships[id].alive and (ships[id].has_net or id == my_id):
+				out.append(["s", id])
+		return out
+	for id in ships:
+		if id <= ENEMY_BASE and ships[id].alive:
+			out.append(["s", id])
+	for k in boss.parts.size():
+		if (alive_mask & (1 << k)) == 0:
+			continue
+		if boss.parts[k].kind == Boss.WEAK and (active_mask & (1 << k)) == 0:
+			continue
+		out.append(["p", k])
+	return out
+
+
+func _tgt_pos(tgt):
+	if tgt == null:
+		return null
+	if tgt[0] == "s":
+		var s = ships.get(tgt[1])
+		if s == null or not s.alive:
+			return null
+		return s.position
+	if (alive_mask & (1 << tgt[1])) == 0:
+		return null
+	return boss.parts[tgt[1]].pos
+
+
+func _swarm_split(sh: Dictionary) -> void:
+	var cands = _swarm_targets(sh.owner)
+	var from: Vector3 = sh.p
+	cands.sort_custom(func(a, b): return _tgt_pos(a).distance_to(from) < _tgt_pos(b).distance_to(from))
+	_pop(sh.p, 6.0, Color(1.0, 0.6, 0.2))
+	var fwd = sh.v.normalized()
+	var col = Color(1.0, 0.55, 0.2)
+	for k in SWARM_COUNT:
+		var d = (fwd + Vector3(randf_range(-0.7, 0.7), randf_range(-0.7, 0.7), randf_range(-0.7, 0.7))).normalized()
+		var n = Node3D.new()
+		var body = Node3D.new()
+		body.scale = Vector3.ONE * 0.55
+		n.add_child(body)
+		Lib.missile_model(body, col, true)
+		add_child(n)
+		Lib.face(n, sh.p, d)
+		var tgt = cands[k % cands.size()] if cands.size() > 0 else null
+		shots.append({"n": n, "p": sh.p, "o": sh.p, "v": d * ROCKET_SPEED * 1.15, "life": 3.0, "owner": sh.owner, "dmg": maxi(1, int(round(ROCKET_DMG * SWARM_K))), "rocket": true, "trail": 0.0, "spin": null, "arcs": [], "swarm": false, "mini": true, "age": 0.0, "tgt": tgt})
+
+
+func _home(sh: Dictionary, dt: float) -> void:
+	if _tgt_pos(sh.tgt) == null:
+		sh.tgt = null
+		var cands = _swarm_targets(sh.owner)
+		if sh.mini and cands.size() > 0:
+			sh.tgt = cands[randi() % cands.size()]
+		elif sh.swarm and cands.size() > 0:
+			# the parent missile leans toward whatever is closest to its nose
+			var fwd = sh.v.normalized()
+			var best = 0.5
+			for c in cands:
+				var dd = (_tgt_pos(c) - sh.p).normalized().dot(fwd)
+				if dd > best:
+					best = dd
+					sh.tgt = c
+	var tp = _tgt_pos(sh.tgt)
+	if tp == null:
+		return
+	var spd = sh.v.length()
+	var cur = sh.v / maxf(spd, 0.001)
+	var want = (tp - sh.p).normalized()
+	var ang = cur.angle_to(want)
+	if ang > 0.0001:
+		var turn = SWARM_TURN * (1.0 if sh.mini else 0.5)
+		cur = cur.slerp(want, minf(1.0, turn * dt / ang)).normalized()
+	sh.v = cur * spd
+	Lib.face(sh.n, sh.p, cur)

@@ -64,6 +64,7 @@ var static_solids = []
 var static_boxes = []
 var roof_gun_i = -1
 var dc_xform = Transform3D()
+var dc_top_solid = -1
 var dyn_solids = []
 var shovel: Node3D
 var load_chips: Node3D
@@ -305,6 +306,7 @@ func _build_furnace() -> void:
 	furnace_top = f.transform * Vector3(0, 178, 22)
 	static_solids.append([f.transform * Vector3(0, 45, 0), 55.0])
 	static_solids.append([f.transform * Vector3(0, 120, 0), 55.0])
+	dc_top_solid = static_solids.size()
 	static_solids.append([f.transform * Vector3(0, 175, 0), 45.0])
 
 

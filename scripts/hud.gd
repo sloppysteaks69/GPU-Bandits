@@ -444,6 +444,12 @@ func _draw_play(w: float, h: float, cx: float) -> void:
 
 	for i in m.feed.size():
 		txt(m.feed[i][0], Vector2(40, 140 + 30 * i), 24, Color(1, 1, 1, clampf(m.feed[i][1], 0.0, 1.0)))
+	if m.pbuffs.has(m.my_id):
+		var k = 0
+		for ty in m.pbuffs[m.my_id]:
+			var left = m.pbuffs[m.my_id][ty]
+			txt("%s  %d" % [m.BUFF_NAMES[ty], int(ceil(left))], Vector2(w - 420, h - 220 - 36 * k), 30, m.BUFF_COLS[ty])
+			k += 1
 	if m.comm != null:
 		_draw_comm(Vector2(40, h - 320))
 	if me != null and not me.alive:
