@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.5"
+const VERSION = "1.0.6"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -4917,7 +4917,7 @@ const BUFF_TIME = 45.0
 const BUFF_PICK_R = 16.0
 const POWER_DMG_K = 1.5
 const POWER_PITCH = 0.7
-const SWARM_SPLIT_T = 2.0
+const SWARM_SPLIT_T = 0.5
 const SWARM_COUNT = 6
 const SWARM_K = 0.25
 const SWARM_TURN = 3.2
