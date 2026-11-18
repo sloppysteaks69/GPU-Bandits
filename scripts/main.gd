@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.2"
+const VERSION = "1.0.3"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -429,7 +429,9 @@ func _ready() -> void:
 	sfx_player.stream = sfx_volley
 	sfx_player.volume_db = -4.0
 	add_child(sfx_player)
+	_setup_audio_buses()
 	music = AudioStreamPlayer.new()
+	music.bus = "Music"
 	music.stream = _load_sound("res://sounds/soundtrack_v041.ogg")
 	if music.stream != null:
 		music.stream.set("loop", true)
@@ -479,6 +481,22 @@ func _ready() -> void:
 
 
 # Optional quick start from the command line (--host / --join=<ip>). The game never quits by itself.
+# 1.0.3 mix: music 30% louder, every sound effect 30% quieter (amplitude). Effects play on the
+# Master bus, the soundtrack on its own "Music" bus that feeds Master.
+const MUSIC_GAIN = 1.3
+const SFX_GAIN = 0.7
+
+
+func _setup_audio_buses() -> void:
+	AudioServer.set_bus_volume_db(0, linear_to_db(SFX_GAIN))
+	if AudioServer.get_bus_index("Music") < 0:
+		var i = AudioServer.bus_count
+		AudioServer.add_bus(i)
+		AudioServer.set_bus_name(i, "Music")
+		AudioServer.set_bus_send(i, "Master")
+	AudioServer.set_bus_volume_db(AudioServer.get_bus_index("Music"), linear_to_db(MUSIC_GAIN / SFX_GAIN))
+
+
 func _args_launch() -> void:
 	status = ""
 	if arg_host:
