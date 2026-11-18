@@ -1,0 +1,7 @@
+.godot/
+build/
+*.exe
+*.pck
+*.zip
+scalper_config.cfg
+scalper_config.cfg.bad
