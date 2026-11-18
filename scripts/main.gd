@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.3"
+const VERSION = "1.0.4"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -422,6 +422,7 @@ func _ready() -> void:
 	voice = AudioStreamPlayer.new()
 	voice.volume_db = -8.0
 	add_child(voice)
+	_setup_huang()
 	_load_portrait()
 	_load_ace_clips()
 	sfx_volley = _load_sound("res://sounds/pulse_volley_v033.ogg")
@@ -1261,6 +1262,7 @@ func ev_begin(bname: String, tuning: Dictionary, mode: int) -> void:
 	if bname.strip_edges() != "":
 		boss_name = bname.strip_edges().left(40)
 	game_mode = clampi(mode, 0, MODE_NAMES.size() - 1)
+	huang_t = HUANG_FIRST
 	if not is_host:
 		_apply_tuning(tuning)
 	for id in players:
@@ -1627,6 +1629,7 @@ func _process(dt: float) -> void:
 	_tick_wrecks(dt)
 	_tick_towers(dt)
 	_tick_comm(dt)
+	_tick_ace_beams(dt)
 	_tick_fx(dt)
 	_camera(dt)
 	hit_t -= dt
@@ -3417,6 +3420,7 @@ func _host_tick(dt: float) -> void:
 				_host_start()
 	elif state == PLAYING:
 		match_t += dt
+		_huang_host(dt)
 		for id in hostp:
 			var h = hostp[id]
 			h.protect = maxf(0.0, h.protect - dt)
@@ -4096,7 +4100,12 @@ func _ai_step(id: int, b: Dictionary, dt: float, enemy: bool) -> void:
 		var fwd = -s.basis.z
 		if fwd.angle_to(to) < 0.14 and _los_cached("b%d" % id, s.position + fwd * 4.0, tpos):
 			var dir = (fwd + Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * jitter).normalized()
-			if b.fire <= 0.0:
+			if enemy:
+				# 1.0.4: the pink aces fire a charged energy beam instead of laser bolts
+				if b.fire <= 0.0 and dist < ACE_BEAM_LEN - 30.0 and not ace_beams.has(id):
+					b.fire = randf_range(3.0, 4.5)
+					rpc("ev_ace_beam", id)
+			elif b.fire <= 0.0:
 				b.fire = 0.26
 				b.side = -b.side
 				var mz = s.position + s.basis * Vector3(2.4 * b.side, 0.0, -2.3)
@@ -4245,7 +4254,12 @@ func _tick_comm(dt: float) -> void:
 	if comm == null and comm_q.size() > 0 and state == PLAYING:
 		var next = comm_q.pop_front()
 		comm = {"id": next[0], "text": next[1], "t": 0.0, "dur": 1.3 + next[1].length() * 0.05, "clip": -1}
-		if next[0] <= ENEMY_BASE and ace_clips.size() > 0:
+		if next.size() > 2 and next[2] >= 0 and next[2] < huang_snd.size() and huang_snd[next[2]] != null:
+			comm["huang"] = next[2]
+			comm.dur = huang_snd[next[2]].get_length() + 0.6
+			huang_voice.stream = huang_snd[next[2]]
+			huang_voice.play()
+		elif next[0] <= ENEMY_BASE and ace_clips.size() > 0:
 
 			comm.clip = randi() % ace_clips.size()
 			comm.dur = ACE_CLIP_FRAMES / ACE_CLIP_FPS
@@ -4264,10 +4278,196 @@ func _tick_comm(dt: float) -> void:
 		if comm.t > comm.dur or state != PLAYING:
 			comm = null
 			voice.stop()
+			if state != PLAYING:
+				huang_voice.stop()
 		elif comm.clip < 0 and comm.t > comm.text.length() / 34.0 + 0.15 and voice.playing:
 			voice.stop()
 
 
+
+
+	_tick_huang_face(dt)
+
+
+# ---- Mecha Huang comm card (standalone 1.0.4) ---------------------------------------------
+# Every 30 s (first one 15 s in) the host picks one of Huang's voice lines; every machine shows
+# his real face, rendered live from the boss model by a small second camera, with the jaw bone
+# driven by the clip's loudness (20 steps a second, 0-9).
+const HUANG_FIRST = 15.0
+const HUANG_EVERY = 30.0
+const HUANG_JAW = 0.42
+const HUANG_LINES = [
+	["res://sounds/huang_revenue.ogg", "Must... grow... revenue.",
+		"0000158841100000000000000369985310000000000002687433220000"],
+	["res://sounds/huang_circular.ogg", "Mmm... circular financing.",
+		"00036899876542000000036874365431000000000058986542111000000"],
+	["res://sounds/huang_returns.ogg", "The returns are too great.",
+		"00013676420000000000122225664200000000000001599985310000000000036764200000000000369962000000"],
+	["res://sounds/huang_chips.ogg", "Chip shortages, hah hah hah!",
+		"0002467500000000002479753221000000000000037985100000000268974210000000000004797520000"],
+]
+var huang_snd = []
+var huang_t = HUANG_FIRST
+var huang_last = -1
+var huang_voice: AudioStreamPlayer
+var huang_vp: SubViewport
+var huang_cam: Camera3D
+var huang_jaw = 0.0
+
+
+func _setup_huang() -> void:
+	for l in HUANG_LINES:
+		huang_snd.append(_load_sound(l[0]))
+	huang_voice = AudioStreamPlayer.new()
+	huang_voice.volume_db = 2.0
+	add_child(huang_voice)
+	huang_vp = SubViewport.new()
+	huang_vp.size = Vector2i(416, 312)
+	huang_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	huang_vp.audio_listener_enable_3d = false
+	add_child(huang_vp)
+	huang_cam = Camera3D.new()
+	huang_cam.fov = 22.0
+	huang_cam.near = 2.0
+	huang_cam.far = 4000.0
+	huang_vp.add_child(huang_cam)
+	huang_cam.current = true
+
+
+func _huang_host(dt: float) -> void:
+	if boss_hp <= 0:
+		return
+	huang_t -= dt
+	if huang_t > 0.0:
+		return
+	huang_t = HUANG_EVERY
+	var i = randi() % HUANG_LINES.size()
+	if i == huang_last:
+		i = (i + 1 + randi() % (HUANG_LINES.size() - 1)) % HUANG_LINES.size()
+	huang_last = i
+	rpc("ev_huang", i)
+
+
+@rpc("authority", "call_local", "reliable")
+func ev_huang(i: int) -> void:
+	if state != PLAYING or i < 0 or i >= HUANG_LINES.size():
+		return
+	print("GB_HUANG:%d" % i)
+	comm_q.push_front([0, HUANG_LINES[i][1], i])
+	if comm_q.size() > 3:
+		comm_q.resize(3)
+
+
+func huang_face_on() -> bool:
+	return comm != null and comm.id == 0 and huang_vp != null and boss != null
+
+
+func _tick_huang_face(dt: float) -> void:
+	var want = 0.0
+	if huang_face_on():
+		if comm.has("huang"):
+			var env: String = HUANG_LINES[comm.huang][2]
+			var k = int(comm.t * 20.0)
+			if k < env.length():
+				want = HUANG_JAW * float(env.unicode_at(k) - 48) / 9.0
+		elif comm.t < comm.text.length() / 34.0:
+			want = HUANG_JAW * absf(sin(comm.t * 13.0))
+	huang_jaw = lerpf(huang_jaw, want, minf(1.0, 25.0 * dt))
+	if boss != null:
+		boss.talk_jaw = huang_jaw
+	if huang_vp == null:
+		return
+	if huang_face_on():
+		huang_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+		huang_cam.global_transform = boss.face_cam()
+	else:
+		huang_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+
+
+# ---- Pink ace energy beam (standalone 1.0.4) ----------------------------------------------
+# The host decides when an ace fires (ev_ace_beam); every machine then draws the same beam from
+# that ace's nose: 0.45 s charge orb, then 0.7 s of beam that sweeps with the ship. The beam stops
+# at the ground, towers, the boss or the first pilot in its path. Only the host deals damage.
+const AceBeam = preload("res://scripts/ace_beam.gd")
+const ACE_BEAM_CHARGE = 0.45
+const ACE_BEAM_FIRE = 0.7
+const ACE_BEAM_LEN = 330.0
+const ACE_BEAM_DPS = 90.0
+const ACE_BEAM_HIT_R = 5.0
+var ace_beams = {}
+var sfx_ace_beam: AudioStream
+
+
+@rpc("authority", "call_local", "reliable")
+func ev_ace_beam(id: int) -> void:
+	if state != PLAYING or ace_beams.has(id) or not ships.has(id):
+		return
+	print("GB_ACE_BEAM:%d" % id)
+	var node = AceBeam.new()
+	add_child(node)
+	if sfx_ace_beam == null:
+		sfx_ace_beam = _load_sound("res://sounds/ace_beam.ogg")
+	node.build(sfx_ace_beam if sfx_ace_beam != null else sfx_beam)
+	ace_beams[id] = {"t": 0.0, "node": node, "acc": 0.0, "fx": 0.0}
+
+
+func _beam_stop(nose: Vector3, fwd: Vector3, length: float) -> float:
+	var steps = 22
+	var far = Vector3(0, -100000, 0)
+	var prev = nose
+	for k in range(1, steps + 1):
+		var p = nose + fwd * (length * k / steps)
+		if p.y < 0.0:
+			return maxf(0.0, length * (k - 1) / steps + (prev.y / maxf(0.001, prev.y - p.y)) * length / steps)
+		if _seg_pillar(prev, p) >= 0 or _seg_box(prev, p) or _seg_solid(prev, p, nose, far):
+			return length * (k - 0.5) / steps
+		prev = p
+	return length
+
+
+func _tick_ace_beams(dt: float) -> void:
+	for id in ace_beams.keys():
+		var bm = ace_beams[id]
+		var s = ships.get(id)
+		bm.t += dt
+		if s == null or not s.alive or state != PLAYING or bm.t > ACE_BEAM_CHARGE + ACE_BEAM_FIRE:
+			bm.node.queue_free()
+			ace_beams.erase(id)
+			continue
+		var fwd = (-s.basis.z).normalized()
+		var nose = s.position + fwd * 4.0
+		bm.node.global_transform = Transform3D(Basis.looking_at(fwd, Vector3.UP if absf(fwd.y) < 0.98 else Vector3.RIGHT), nose)
+		if bm.t < ACE_BEAM_CHARGE:
+			bm.node.show_charge(bm.t / ACE_BEAM_CHARGE, dt)
+			continue
+		var best = _beam_stop(nose, fwd, ACE_BEAM_LEN)
+		var hit_id = 0
+		for oid in ships:
+			if oid <= ENEMY_BASE or oid == 0:
+				continue
+			var o = ships[oid]
+			if not o.alive or not (o.has_net or oid == my_id):
+				continue
+			var along = (o.position - nose).dot(fwd)
+			if along < 0.0 or along > best:
+				continue
+			if (nose + fwd * along).distance_to(o.position) < ACE_BEAM_HIT_R:
+				best = along
+				hit_id = oid
+		bm.node.show_fire(1.0 - (bm.t - ACE_BEAM_CHARGE) / ACE_BEAM_FIRE, best, best < ACE_BEAM_LEN - 0.5, dt)
+		if hit_id != 0 and is_host:
+			var o = ships[hit_id]
+			if o.rolling or o.shielded:
+				continue
+			bm.acc += ACE_BEAM_DPS * dt
+			if bm.acc >= 6.0:
+				var n = int(bm.acc)
+				bm.acc -= n
+				_apply_hit_player(id, hit_id, n)
+			bm.fx -= dt
+			if bm.fx <= 0.0:
+				bm.fx = 0.15
+				rpc("ev_shield", hit_id, -fwd)
 
 
 func _tick_engines(dt: float) -> void:

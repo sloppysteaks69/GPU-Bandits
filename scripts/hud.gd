@@ -477,10 +477,11 @@ func _draw_comm(at: Vector2) -> void:
 		col = Color(1.0, 0.3, 0.75)
 		who = "PINK ACE"
 	var is_clip = c.clip >= 0 and c.clip < m.ace_clips.size()
-	var psize = Vector2(208, 156) if is_clip else Vector2(106, 106)
-	if is_clip:
+	var is_face = m.huang_face_on()
+	var psize = Vector2(208, 156) if (is_clip or is_face) else Vector2(106, 106)
+	if is_clip or is_face:
 		at.y -= 50.0
-	var box = Vector2(760 if is_clip else 660, psize.y + 26.0)
+	var box = Vector2(760 if (is_clip or is_face) else 660, psize.y + 26.0)
 	draw_rect(Rect2(at, box), Color(0.0, 0.05, 0.1, 0.8))
 	draw_rect(Rect2(at, box), col, false, 3.0)
 	var pr = Rect2(at + Vector2(13, 13), psize)
@@ -489,6 +490,8 @@ func _draw_comm(at: Vector2) -> void:
 		var f = mini(int(c.t * m.ACE_CLIP_FPS), m.ACE_CLIP_FRAMES - 1)
 		var src = Rect2((f % m.ACE_CLIP_COLS) * m.ACE_CLIP_W, (f / m.ACE_CLIP_COLS) * m.ACE_CLIP_H, m.ACE_CLIP_W, m.ACE_CLIP_H)
 		draw_texture_rect_region(m.ace_clips[c.clip].tex, pr, src)
+	elif is_face:
+		draw_texture_rect(m.huang_vp.get_texture(), pr, false)
 	elif m.portraits.has(c.id):
 		draw_texture_rect(m.portraits[c.id], pr, false)
 	else:

@@ -81,6 +81,7 @@ var beam_outer: MeshInstance3D
 var beam_core: MeshInstance3D
 var mouth_ball: MeshInstance3D
 var mouth_mat: StandardMaterial3D
+var talk_jaw = 0.0
 
 const DEFORMABLE = false
 const VX = 128
@@ -625,6 +626,15 @@ func _solve(bend: float, twist: float, tilt: float, head_yaw: float, head_pitch:
 	return [gr, d]
 
 
+# Camera spot for the Mecha Huang comm card: just in front of his face, locked to the head bone.
+func face_cam() -> Transform3D:
+	var hd = bi["head"]
+	var eye = global_transform * _on_bone(hd, Vector3(0.1, 0.92, 0.5))
+	var at = global_transform * _on_bone(hd, Vector3(0.0, 0.9, 0.0))
+	var up = (global_transform.basis * (gb[hd] * Vector3.UP)).normalized()
+	return Transform3D(Basis.looking_at(at - eye, up), eye)
+
+
 func _fk() -> void:
 	for i in BONES.size():
 		var p = BONES[i][1]
@@ -677,7 +687,7 @@ func animate(t: float, dt: float, alive_mask: int, active_mask: int) -> void:
 	var p_twist = lerpf(lerpf(key[1], body_tw, k), 0.15, defeat_k)
 	var p_tilt = lerpf(lerpf(key[2], -0.3, k), 0.5, defeat_k)
 	var p_hpitch = lerpf(-beam_pitch * k, 0.6, defeat_k)
-	var sol = _solve(p_bend, p_twist, p_tilt, head_yaw * k, p_hpitch, lerpf(jaw, 0.5, defeat_k))
+	var sol = _solve(p_bend, p_twist, p_tilt, head_yaw * k, p_hpitch, lerpf(maxf(jaw, talk_jaw), 0.5, defeat_k))
 	var gr: Vector3 = sol[0]
 	var d: Vector3 = sol[1]
 	var cb: Basis = gb[bi["chest"]]
