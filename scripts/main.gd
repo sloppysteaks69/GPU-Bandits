@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.6"
+const VERSION = "1.0.7"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -1590,6 +1590,10 @@ func _process(dt: float) -> void:
 			var hurt = clampf(1.0 - players[id].ar / float(ARMOR_MAX), 0.0, 1.0)
 			s.set_damage(hurt)
 			s.set_shield(players[id].hp / float(SHIELD_MAX))
+			var oc = 0.0
+			if has_buff(id, BUFF_SHIELD) and players[id].hp > 0 and s.alive:
+				oc = 0.45 + 0.55 * clampf(players[id].hp / float(SHIELD_MAX) - 1.0, 0.0, 1.0)
+			s.set_overcharge(oc if vis else 0.0)
 			# armour went down since last frame (any source, also seen through host snapshots)
 			var ar_now = players[id].ar
 			var ar_was = ar_seen.get(id, ar_now)
@@ -3468,12 +3472,12 @@ func _host_tick(dt: float) -> void:
 
 			if h.alive and players.has(id):
 				h["since"] = h.get("since", 0.0) + dt
-				if h["since"] > SHIELD_DELAY and players[id].hp < SHIELD_MAX:
+				if h["since"] > SHIELD_DELAY and players[id].hp < sh_max(id):
 					h["regen"] = h.get("regen", 0.0) + SHIELD_REGEN * dt
 					var whole = int(h["regen"])
 					if whole > 0:
 						h["regen"] -= whole
-						players[id].hp = mini(SHIELD_MAX, players[id].hp + whole)
+						players[id].hp = mini(sh_max(id), players[id].hp + whole)
 			if not h.alive:
 				h.respawn -= dt
 				if h.respawn <= 0.0 and players.has(id):
@@ -4910,9 +4914,10 @@ func ev_missile_gone(mid: int) -> void:
 const BUFF_RAPID = 0
 const BUFF_POWER = 1
 const BUFF_SWARM = 2
-const BUFF_NAMES = ["RAPID FIRE", "OVERCHARGE", "SWARM MISSILES"]
-const BUFF_INFO = ["guns fire twice as fast", "guns hit 50% harder", "missiles split into 6 homing missiles"]
-const BUFF_COLS = [Color(1.0, 0.85, 0.2), Color(0.45, 0.9, 1.0), Color(1.0, 0.4, 0.15)]
+const BUFF_SHIELD = 3
+const BUFF_NAMES = ["RAPID FIRE", "OVERCHARGE", "SWARM MISSILES", "SHIELD OVERCHARGE"]
+const BUFF_INFO = ["guns fire twice as fast", "guns hit 50% harder", "missiles split into 6 homing missiles", "shields boosted to 200%"]
+const BUFF_COLS = [Color(1.0, 0.85, 0.2), Color(0.45, 0.9, 1.0), Color(1.0, 0.4, 0.15), Color(0.7, 0.55, 1.0)]
 const BUFF_TIME = 45.0
 const BUFF_PICK_R = 16.0
 const POWER_DMG_K = 1.5
@@ -4931,6 +4936,11 @@ func has_buff(pid: int, ty: int) -> bool:
 	return pbuffs.has(pid) and pbuffs[pid].get(ty, 0.0) > 0.0
 
 
+# SHIELD OVERCHARGE doubles that pilot's shield cap while it lasts.
+func sh_max(pid: int) -> int:
+	return SHIELD_MAX * (2 if has_buff(pid, BUFF_SHIELD) else 1)
+
+
 func _gun_k(pid: int) -> float:
 	return 0.5 if has_buff(pid, BUFF_RAPID) else 1.0
 
@@ -4939,12 +4949,12 @@ func _drop_buff(pos: Vector3) -> void:
 	if not is_host or game_mode != MODE_BOSS or state != PLAYING:
 		return
 	buff_seq += 1
-	rpc("ev_buff_spawn", buff_seq, randi() % 3, Vector3(pos.x, maxf(pos.y, 16.0), pos.z))
+	rpc("ev_buff_spawn", buff_seq, randi() % BUFF_NAMES.size(), Vector3(pos.x, maxf(pos.y, 16.0), pos.z))
 
 
 @rpc("authority", "call_local", "reliable")
 func ev_buff_spawn(bid: int, ty: int, pos: Vector3) -> void:
-	if state != PLAYING or world_buffs.has(bid) or ty < 0 or ty > 2:
+	if state != PLAYING or world_buffs.has(bid) or ty < 0 or ty >= BUFF_NAMES.size():
 		return
 	var n = _buff_node(ty)
 	add_child(n)
@@ -5018,6 +5028,8 @@ func _tick_buffs(dt: float) -> void:
 			pbuffs[pid][ty] -= dt
 			if pbuffs[pid][ty] <= 0.0:
 				pbuffs[pid].erase(ty)
+				if ty == BUFF_SHIELD and is_host and players.has(pid):
+					players[pid].hp = mini(players[pid].hp, SHIELD_MAX)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -5034,14 +5046,16 @@ func c_buff_take(bid: int) -> void:
 func ev_buff_taken(bid: int, pid: int, ty: int) -> void:
 	if world_buffs.has(bid):
 		var b = world_buffs[bid]
-		_pop(b.n.position, 10.0, BUFF_COLS[clampi(ty, 0, 2)])
+		_pop(b.n.position, 10.0, BUFF_COLS[clampi(ty, 0, BUFF_NAMES.size() - 1)])
 		b.n.queue_free()
 		world_buffs.erase(bid)
-	if state != PLAYING or ty < 0 or ty > 2:
+	if state != PLAYING or ty < 0 or ty >= BUFF_NAMES.size():
 		return
 	if not pbuffs.has(pid):
 		pbuffs[pid] = {}
 	pbuffs[pid][ty] = BUFF_TIME
+	if ty == BUFF_SHIELD and is_host and players.has(pid):
+		players[pid].hp = SHIELD_MAX * 2
 	if pid == my_id:
 		_say("%s!  %s for %d s" % [BUFF_NAMES[ty], BUFF_INFO[ty], int(BUFF_TIME)])
 	elif players.has(pid):

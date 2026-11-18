@@ -45,6 +45,11 @@ static var scorch_tex: ImageTexture = null
 static var hot_tex: ImageTexture = null
 var scorches = []
 var last_scorch = -10.0
+# 1.0.7 SHIELD OVERCHARGE: the bubble stays lit and electric arcs crawl over it
+var over_k = 0.0
+var over_arcs = []
+static var over_mesh: BoxMesh = null
+static var over_mat: Material = null
 
 
 func build(c: Color, is_elite: bool = false) -> void:
@@ -408,7 +413,43 @@ func set_shield(k: float) -> void:
 
 
 func _shield_vis() -> void:
-	shield.visible = not hits.is_empty() or (shield_k > 0.0 and shield_k < 0.35)
+	shield.visible = over_k > 0.0 or not hits.is_empty() or (shield_k > 0.0 and shield_k < 0.35)
+
+
+# k = 0 off, up to 1 at a full 200% shield. Called every frame; the arcs jump about as it goes.
+func set_overcharge(k: float) -> void:
+	if shield == null:
+		return
+	if k <= 0.0 and over_k <= 0.0:
+		return
+	if absf(k - over_k) > 0.001:
+		over_k = k
+		shield_mat.set_shader_parameter("over", k)
+		_shield_vis()
+	if over_arcs.is_empty():
+		if over_mesh == null:
+			over_mesh = BoxMesh.new()
+			over_mesh.size = Vector3(0.14, 0.14, 1.0)
+			over_mat = Lib.glow(Color(0.8, 0.7, 1.0), 10.0)
+		for i in 10:
+			var a = MeshInstance3D.new()
+			a.mesh = over_mesh
+			a.material_override = over_mat
+			a.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			add_child(a)
+			over_arcs.append(a)
+	for a in over_arcs:
+		if k <= 0.0:
+			a.visible = false
+			continue
+		if randf() < 0.5:
+			a.visible = randf() < 0.35 + 0.6 * k
+			var n = Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)).normalized()
+			var tg = n.cross(Vector3.UP if absf(n.y) < 0.9 else Vector3.RIGHT).normalized().rotated(n, randf() * TAU)
+			var ln = randf_range(1.5, 4.5)
+			a.basis = Basis.looking_at(tg, n)
+			a.scale = Vector3(1, 1, ln)
+			a.position = n * 6.7
 
 
 
