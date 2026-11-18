@@ -7,11 +7,14 @@ Every mesh is built in code; the only imported assets are the boss model, sounds
 
 **Boss Hunt (co-op).** Everyone flies against the mecha boss, his turrets, missile pods,
 point-defence guns and three pink ace jets. There is no time limit: the match ends a few
-seconds after the boss goes down. Highest score wins.
+seconds after the boss goes down. Highest score wins. Destroyed guns leave a floating buff
+behind: fly through it to pick it up (Rapid Fire, Overcharge, Swarm Missiles or Shield
+Overcharge, 45 seconds each).
 
-**Deathmatch.** Pilots against pilots, 3 lives each, no time limit. The boss is switched off
-and stays as scenery and cover. The last pilot still flying wins. Pilots who are out watch
-the others (click to switch who you watch).
+**Deathmatch.** Pilots against pilots, 3 lives each, no time limit. The boss's guns and aces
+are switched off, but he still sweeps his mouth laser, so stay out of his face. Buffs float
+in at random gun spots, faster and more of them the more pilots are left. The last pilot
+still flying wins. Pilots who are out watch the others (click to switch who you watch).
 
 ## Playing
 

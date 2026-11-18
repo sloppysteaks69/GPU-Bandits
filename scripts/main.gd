@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.7"
+const VERSION = "1.0.8"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -1225,14 +1225,15 @@ func _host_start() -> void:
 		bots[id] = _ai_state()
 		_bot_place(id, TAU * players[id].col / float(MAX_PLAYERS))
 	if game_mode == MODE_DM:
-		# Deathmatch: the boss is only scenery and cover. His guns, weak spots, mouth laser and
-		# the pink aces are switched off so every kill belongs to a pilot.
+		# Deathmatch: the boss is scenery and cover. His guns, weak spots and the pink aces are
+		# switched off, but he still sweeps his mouth laser, and buffs float where his guns were.
 		for i in part_alive.size():
 			part_alive[i] = false
 			part_respawn[i] = INF
 			weak_active[i] = false
 		weak_timer = INF
-		beam_cd = INF
+		beam_cd = 12.0
+		dm_buff_cd = 10.0
 		_recalc_masks()
 		boss_hp_max = 1
 		boss_hp = 1
@@ -3494,6 +3495,9 @@ func _host_tick(dt: float) -> void:
 				host_missiles.erase(mid)
 		if game_mode == MODE_BOSS:
 			_host_boss(dt)
+		else:
+			_host_beam(dt)
+			_host_dm_buffs(dt)
 			_host_enemies(dt)
 		_host_bots(dt)
 		if game_mode == MODE_DM and end_timer < 0.0:
@@ -3636,6 +3640,14 @@ func _shuffle_weak() -> void:
 
 
 func _host_boss(dt: float) -> void:
+	_host_beam(dt)
+	weak_timer -= dt
+	if weak_timer <= 0.0:
+		_shuffle_weak()
+	_host_parts(dt)
+
+
+func _host_beam(dt: float) -> void:
 	beam_cd -= dt
 	if beam_cd <= 0.0:
 		beam_cd = randf_range(16.0, 22.0)
@@ -3649,9 +3661,9 @@ func _host_boss(dt: float) -> void:
 			var pitch = clampf(atan2(tp.y - 163.0, maxf(1.0, Vector2(tp.x, tp.z).length())), -0.6, 0.6)
 			rpc("ev_beam", yaw, pitch, 1.0 if randf() < 0.5 else -1.0)
 			_radio(0, ["FEED. THE. FURNACE.", "GET OUT OF MY FACE.", "YOU ARE IN MY WAY."])
-	weak_timer -= dt
-	if weak_timer <= 0.0:
-		_shuffle_weak()
+
+
+func _host_parts(dt: float) -> void:
 	var changed = false
 	for i in boss.parts.size():
 		var p = boss.parts[i]
@@ -4929,6 +4941,43 @@ const SWARM_TURN = 3.2
 var world_buffs = {}
 var pbuffs = {}
 var buff_seq = 0
+# Deathmatch has no guns to shoot down, so the host floats a random buff at a random
+# empty gun spot. More pilots still in the fight = buffs come faster and more wait at once:
+# one every DM_BUFF_PERIOD / pilots seconds (6..30 s), up to one per pilot (2..12) waiting.
+const DM_BUFF_PERIOD = 40.0
+var dm_buff_cd = 10.0
+
+
+func _dm_pilots() -> int:
+	var n = 0
+	for id in players:
+		if players[id].lives > 0:
+			n += 1
+	return n
+
+
+func _host_dm_buffs(dt: float) -> void:
+	dm_buff_cd -= dt
+	if dm_buff_cd > 0.0:
+		return
+	var n = maxi(1, _dm_pilots())
+	dm_buff_cd = clampf(DM_BUFF_PERIOD / n, 6.0, 30.0) * randf_range(0.8, 1.2)
+	if world_buffs.size() >= clampi(n, 2, 12):
+		return
+	var spots = []
+	for i in boss.parts.size():
+		if boss.parts[i].kind == Boss.WEAK:
+			continue
+		var p: Vector3 = boss.parts[i].pos
+		var free = true
+		for bid in world_buffs:
+			if world_buffs[bid].pos.distance_to(p) < 20.0:
+				free = false
+				break
+		if free:
+			spots.append(p)
+	if not spots.is_empty():
+		_spawn_buff(spots[randi() % spots.size()])
 var arc_mesh: BoxMesh
 
 
@@ -4948,6 +4997,10 @@ func _gun_k(pid: int) -> float:
 func _drop_buff(pos: Vector3) -> void:
 	if not is_host or game_mode != MODE_BOSS or state != PLAYING:
 		return
+	_spawn_buff(pos)
+
+
+func _spawn_buff(pos: Vector3) -> void:
 	buff_seq += 1
 	rpc("ev_buff_spawn", buff_seq, randi() % BUFF_NAMES.size(), Vector3(pos.x, maxf(pos.y, 16.0), pos.z))
 
@@ -5098,7 +5151,7 @@ func _crackle(arcs: Array) -> void:
 
 
 # SWARM MISSILES: what a homing missile can chase. Boss hunt: pink aces and every live gun or
-# lit weak spot. Deathmatch (no buffs drop there, but just in case): the other pilots.
+# lit weak spot. Deathmatch: the other pilots.
 func _swarm_targets(owner_id: int) -> Array:
 	var out = []
 	if game_mode == MODE_DM:
