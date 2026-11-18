@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.0"
+const VERSION = "1.0.1"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -226,7 +226,7 @@ var beam_cd = 12.0
 var cfg_hp_player = BOSS_HP_PER_PILOT
 var cfg_hp_bot = BOSS_HP_PER_BOT
 var cfg_hp_min = BOSS_HP_MIN
-var boss_name = "THE BARON"
+var boss_name = "MECHA HUANG"
 var boss_hp = 1
 var boss_hp_max = 1
 var defeat_fx = 0.0
@@ -825,6 +825,7 @@ func _build_world() -> void:
 	pdc_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	pdc_node.custom_aabb = AABB(Vector3(-2000, -100, -2000), Vector3(4000, 1200, 4000))
 	add_child(pdc_node)
+	_setup_sparks()
 	laser_mesh = BoxMesh.new()
 	laser_mesh.size = Vector3(0.45, 0.45, 8.0)
 	heart_mesh = _make_heart()
@@ -1342,6 +1343,7 @@ func _clear_action() -> void:
 	fireballs.clear()
 	pdc_b.clear()
 	pdc_mm.visible_instance_count = 0
+	_clear_sparks()
 	my_wreck = null
 
 
@@ -2403,6 +2405,11 @@ func _tick_shots(dt: float) -> void:
 
 			if not sh.rocket and sh.life > 0.0 and p1.y >= 0.0:
 				_sfx_impact(p1)
+			if sh.life > 0.0:
+				if p1.y < 0.0:
+					_impact_fx(Vector3(p1.x, 0.4, p1.z), Vector3.UP, sh.rocket, sh.owner == 0 or sh.owner <= ENEMY_BASE)
+				else:
+					_impact_fx(p1, -sh.v.normalized(), sh.rocket, sh.owner == 0 or sh.owner <= ENEMY_BASE)
 			if sh.rocket:
 				_fireball(p1, 26.0)
 				if sh.owner == my_id or (is_host and sh.owner < 0 and sh.owner > ENEMY_BASE):
@@ -2691,6 +2698,163 @@ func _pop(pos: Vector3, size: float, col: Color) -> void:
 	add_child(n)
 	fx.append({"n": n, "t": 0.0, "dur": 0.25 + size * 0.02, "size": size})
 
+
+
+# ---- Sparks and debris (standalone 1.0.1) -------------------------------------------------
+# Sparks are one MultiMesh of short glowing streaks moved on the CPU; debris are a few small
+# tumbling chunks. Both are purely visual and run on every machine from the local shot sim.
+const SPARK_MAX = 800
+const DEBRIS_MAX = 80
+const SPARK_GRAVITY = 45.0
+var spark_mm: MultiMesh
+var sparks = []
+var debris = []
+var debris_mesh: BoxMesh
+
+
+func _setup_sparks() -> void:
+	var streak = BoxMesh.new()
+	streak.size = Vector3(0.16, 0.16, 1.0)
+	var mat = StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.vertex_color_use_as_albedo = true
+	streak.material = mat
+	spark_mm = MultiMesh.new()
+	spark_mm.transform_format = MultiMesh.TRANSFORM_3D
+	spark_mm.use_colors = true
+	spark_mm.mesh = streak
+	spark_mm.instance_count = SPARK_MAX
+	spark_mm.visible_instance_count = 0
+	var node = MultiMeshInstance3D.new()
+	node.multimesh = spark_mm
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.custom_aabb = AABB(Vector3(-2000, -100, -2000), Vector3(4000, 1200, 4000))
+	add_child(node)
+	debris_mesh = BoxMesh.new()
+	debris_mesh.size = Vector3(0.9, 0.5, 0.7)
+
+
+func _sparks(pos: Vector3, normal: Vector3, count: int, col: Color, spd: float) -> void:
+	var n = normal.normalized() if normal.length() > 0.001 else Vector3.UP
+	for k in count:
+		var r = Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1))
+		var v = (n + r * 0.85).normalized() * spd * randf_range(0.35, 1.15)
+		var life = randf_range(0.25, 0.7)
+		sparks.append({"p": pos, "v": v, "life": life, "max": life, "col": col})
+	while sparks.size() > SPARK_MAX:
+		sparks.pop_front()
+
+
+func _debris(pos: Vector3, normal: Vector3, count: int, col: Color) -> void:
+	if not mat_cache.has("debris" + col.to_html()):
+		mat_cache["debris" + col.to_html()] = Lib.toon(col)
+	for k in count:
+		var mi = MeshInstance3D.new()
+		mi.mesh = debris_mesh
+		mi.material_override = mat_cache["debris" + col.to_html()]
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.position = pos
+		mi.scale = Vector3.ONE * randf_range(0.6, 1.6)
+		add_child(mi)
+		var v = (normal.normalized() + Vector3(randf_range(-1, 1), randf_range(-0.3, 1), randf_range(-1, 1)) * 0.9).normalized() * randf_range(12.0, 30.0)
+		debris.append({"n": mi, "v": v, "w": Vector3(randf_range(-9, 9), randf_range(-9, 9), randf_range(-9, 9)), "life": randf_range(1.2, 2.2), "smoke": 0.0})
+	while debris.size() > DEBRIS_MAX:
+		debris[0].n.queue_free()
+		debris.pop_front()
+
+
+# A shot hit something solid (boss, tower, building, ground) or was deflected.
+func _impact_fx(pos: Vector3, normal: Vector3, big: bool, enemy_shot: bool) -> void:
+	var col = Color(1.0, 0.35, 0.15) if enemy_shot else Color(1.0, 0.78, 0.35)
+	if big:
+		_sparks(pos, normal, 34, col, 60.0)
+		_sparks(pos, normal, 10, Color(1, 1, 0.85), 85.0)
+		_debris(pos, normal, 5, Color(0.22, 0.22, 0.25))
+		_puff(pos + normal * 2.0, 5.0, 1.6, false, true)
+	else:
+		_sparks(pos, normal, 10, col, 40.0)
+		if randf() < 0.35:
+			_debris(pos, normal, 1, Color(0.3, 0.3, 0.33))
+		if randf() < 0.5:
+			_puff(pos + normal * 1.0, 1.6, 0.8, false, true)
+
+
+# Shield flash on a ship: a ring of cold blue sparks off the shield bubble.
+func _shield_sparks(s: Node3D, dir: Vector3) -> void:
+	if s == null or dir.length() < 0.001:
+		return
+	_sparks(s.position + dir.normalized() * SHIP_R * 1.3, dir, 9, Color(0.45, 0.85, 1.0), 32.0)
+
+
+# Shield is down: hot sparks, a puff of smoke and a chunk of hull.
+func _hull_hit(s: Node3D, dir: Vector3) -> void:
+	if s == null:
+		return
+	var d = dir.normalized() if dir.length() > 0.001 else Vector3.UP
+	var at = s.position + d * SHIP_R
+	_sparks(at, d, 16, Color(1.0, 0.6, 0.2), 45.0)
+	_pop(at, 2.5, Color(1.0, 0.5, 0.1))
+	_puff(at, 2.2, 1.0, false, true)
+	if randf() < 0.5:
+		_debris(at, d, 1, Color(0.5, 0.5, 0.55))
+
+
+func _tick_sparks(dt: float) -> void:
+	if spark_mm == null:
+		return
+	var keep = []
+	var drag = maxf(0.0, 1.0 - 1.8 * dt)
+	for s in sparks:
+		s.life -= dt
+		if s.life <= 0.0:
+			continue
+		s.v.y -= SPARK_GRAVITY * dt
+		s.v *= drag
+		s.p += s.v * dt
+		if s.p.y < 0.2 and s.v.y < 0.0:
+			s.p.y = 0.2
+			s.v.y = -s.v.y * 0.35
+		keep.append(s)
+	sparks = keep
+	spark_mm.visible_instance_count = sparks.size()
+	for k in sparks.size():
+		var s = sparks[k]
+		var sp = s.v.length()
+		var z = s.v / maxf(sp, 0.001)
+		var up = Vector3.UP if absf(z.y) < 0.98 else Vector3.RIGHT
+		var b = Basis.looking_at(z, up) * Basis.from_scale(Vector3(1.0, 1.0, clampf(sp * 0.05, 0.4, 3.0)))
+		spark_mm.set_instance_transform(k, Transform3D(b, s.p))
+		var f = s.life / s.max
+		spark_mm.set_instance_color(k, s.col * (1.0 + 3.0 * f))
+	var j = debris.size() - 1
+	while j >= 0:
+		var d = debris[j]
+		d.life -= dt
+		if d.life <= 0.0:
+			d.n.queue_free()
+			debris.remove_at(j)
+		else:
+			d.v.y -= 30.0 * dt
+			d.n.position += d.v * dt
+			d.n.rotation += d.w * dt
+			if d.n.position.y < 0.4:
+				d.n.position.y = 0.4
+				d.v = Vector3(d.v.x * 0.5, absf(d.v.y) * 0.3, d.v.z * 0.5)
+				d.w *= 0.6
+			d.smoke -= dt
+			if d.smoke <= 0.0 and d.life > 0.6:
+				d.smoke = 0.12
+				_puff(d.n.position, 0.9, 0.6, false, true)
+		j -= 1
+
+
+func _clear_sparks() -> void:
+	sparks.clear()
+	if spark_mm != null:
+		spark_mm.visible_instance_count = 0
+	for d in debris:
+		d.n.queue_free()
+	debris.clear()
 
 
 func _puff(pos: Vector3, size: float, dur: float, heart: bool = false, dark: bool = false) -> void:
@@ -3016,6 +3180,7 @@ func _splash(pos: Vector3, shooter: int) -> void:
 
 func _tick_fx(dt: float) -> void:
 	_tick_fireballs(dt)
+	_tick_sparks(dt)
 	var j = smoke.size() - 1
 	while j >= 0:
 		var sm = smoke[j]
@@ -4116,6 +4281,7 @@ func _my_shield(from_point: Vector3) -> void:
 		return
 	var d = (from_point - me.position).normalized()
 	me.shield_hit(d)
+	_shield_sparks(me, d)
 	rpc("fx_shield", d)
 
 
@@ -4124,6 +4290,7 @@ func fx_shield(dir: Vector3) -> void:
 	var sh = ships.get(multiplayer.get_remote_sender_id())
 	if sh != null and state == PLAYING:
 		sh.shield_hit(dir)
+		_shield_sparks(sh, dir)
 		_sfx_shield(sh.position)
 
 
@@ -4131,9 +4298,14 @@ func fx_shield(dir: Vector3) -> void:
 @rpc("any_peer", "call_local", "unreliable")
 func fx_pilot_hit(id: int, dir: Vector3) -> void:
 	var sh = ships.get(id)
-	if sh == null or state != PLAYING or not players.has(id) or players[id].hp <= 0:
+	if sh == null or state != PLAYING or not players.has(id):
+		return
+	if players[id].hp <= 0:
+		# shield is down: the hit bites into the hull
+		_hull_hit(sh, dir)
 		return
 	sh.shield_hit(dir)
+	_shield_sparks(sh, dir)
 	_sfx_shield(sh.position)
 
 
@@ -4144,6 +4316,7 @@ func ev_shield(id: int, dir: Vector3) -> void:
 		return
 	if sh != null and state == PLAYING:
 		sh.shield_hit(dir)
+		_shield_sparks(sh, dir)
 		if id != my_id:
 			_sfx_shield(sh.position)
 
