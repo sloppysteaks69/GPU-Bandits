@@ -39,6 +39,12 @@ var root: Node3D
 var wing_msl = []
 var wing_at = []
 var wing_loaded = [true, true]
+# 1.0.2 battle damage: soot decals with a hot glow that cools, cleared on repair
+const SCORCH_MAX = 14
+static var scorch_tex: ImageTexture = null
+static var hot_tex: ImageTexture = null
+var scorches = []
+var last_scorch = -10.0
 
 
 func build(c: Color, is_elite: bool = false) -> void:
@@ -259,6 +265,9 @@ func tick_remote(dt: float) -> void:
 func tick_fx(t: float) -> void:
 	var dt = clampf(t - last_t, 0.0, 0.1)
 	last_t = t
+	for sc in scorches:
+		var k = clampf((t - sc[1]) / 2.5, 0.0, 1.0)
+		sc[0].emission_energy = 5.0 * (1.0 - k) * (1.0 - k)
 	if boosting and not was_boost:
 		ign_t = 0.0
 	was_boost = boosting
@@ -313,6 +322,8 @@ func set_damage(d: float) -> void:
 	if q == dmg_q or paint.is_empty():
 		return
 	dmg_q = q
+	if q <= 0.0:
+		clear_scorch()
 	for pm in paint:
 		var clean: Color = pm[1]
 		pm[0].set_shader_parameter("albedo", clean.lerp(Color(0.11, 0.1, 0.09), q * 0.8))
@@ -322,6 +333,67 @@ func set_damage(d: float) -> void:
 		fin.visible = q < 0.8
 
 
+
+
+# A hit got through the shield: stick a soot mark on the hull where it landed.
+func add_scorch(world_dir: Vector3, t: float) -> void:
+	if root == null or world_dir.length() < 0.001:
+		return
+	last_scorch = t
+	var ld = (basis.inverse() * world_dir).normalized()
+	var dec = Decal.new()
+	dec.texture_albedo = _scorch_texture()
+	dec.texture_emission = _hot_texture()
+	dec.emission_energy = 5.0
+	var w = randf_range(1.6, 2.8) * (1.8 if elite else 1.0)
+	dec.size = Vector3(w, 6.0, w)
+	dec.upper_fade = 0.2
+	dec.lower_fade = 0.2
+	dec.albedo_mix = 0.92
+	# a decal projects along its own -Y, so point +Y outward from the hull
+	var y = ld
+	var x = y.cross(Vector3.FORWARD if absf(y.z) < 0.9 else Vector3.RIGHT).normalized()
+	var z = x.cross(y).normalized()
+	dec.transform = Transform3D(Basis(x, y, z).rotated(y, randf() * TAU), ld * 2.6)
+	add_child(dec)
+	scorches.append([dec, t])
+	while scorches.size() > SCORCH_MAX:
+		scorches[0][0].queue_free()
+		scorches.pop_front()
+
+
+func clear_scorch() -> void:
+	for sc in scorches:
+		sc[0].queue_free()
+	scorches.clear()
+
+
+static func _scorch_texture() -> ImageTexture:
+	if scorch_tex == null:
+		var noise = FastNoiseLite.new()
+		noise.frequency = 0.09
+		var img = Image.create_empty(64, 64, false, Image.FORMAT_RGBA8)
+		for py in 64:
+			for px in 64:
+				var d = Vector2(px - 31.5, py - 31.5).length() / 31.5
+				var n = noise.get_noise_2d(px, py) * 0.5 + 0.5
+				var a = clampf((1.0 - d) * 1.6 * (0.55 + 0.6 * n), 0.0, 0.95)
+				var c = lerpf(0.02, 0.12, n)
+				img.set_pixel(px, py, Color(c, c * 0.95, c * 0.9, a))
+		scorch_tex = ImageTexture.create_from_image(img)
+	return scorch_tex
+
+
+static func _hot_texture() -> ImageTexture:
+	if hot_tex == null:
+		var img = Image.create_empty(32, 32, false, Image.FORMAT_RGBA8)
+		for py in 32:
+			for px in 32:
+				var d = Vector2(px - 15.5, py - 15.5).length() / 15.5
+				var k = clampf(1.0 - d * 2.2, 0.0, 1.0)
+				img.set_pixel(px, py, Color(1.0 * k, 0.42 * k, 0.08 * k, 1.0))
+		hot_tex = ImageTexture.create_from_image(img)
+	return hot_tex
 
 
 func set_shield(k: float) -> void:

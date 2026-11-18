@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.1"
+const VERSION = "1.0.2"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -1569,6 +1569,19 @@ func _process(dt: float) -> void:
 			var hurt = clampf(1.0 - players[id].ar / float(ARMOR_MAX), 0.0, 1.0)
 			s.set_damage(hurt)
 			s.set_shield(players[id].hp / float(SHIELD_MAX))
+			# armour went down since last frame (any source, also seen through host snapshots)
+			var ar_now = players[id].ar
+			var ar_was = ar_seen.get(id, ar_now)
+			ar_seen[id] = ar_now
+			if vis and ar_now < ar_was and ar_now > 0 and t - s.last_scorch > 0.25:
+				_hull_hit(s, Vector3(randf_range(-1, 1), randf_range(-0.2, 1), randf_range(-1, 1)))
+			# a badly hurt ship spits sparks from its wounds
+			if vis and hurt > 0.35:
+				spark_cd[id] = spark_cd.get(id, 0.0) - dt
+				if spark_cd[id] <= 0.0:
+					spark_cd[id] = randf_range(0.12, 0.5) * (1.6 - hurt)
+					var off = s.basis * Vector3(randf_range(-2.4, 2.4), randf_range(-0.4, 0.8), randf_range(-2.0, 3.0))
+					_sparks(s.position + off, s.basis * Vector3(randf_range(-1, 1), 1.0, 0.6), int(3 + 7 * hurt), Color(1.0, 0.62, 0.22), 24.0)
 			if vis and hurt > 0.2:
 				dmg_smoke[id] = dmg_smoke.get(id, 0.0) - dt
 				if dmg_smoke[id] <= 0.0:
@@ -2787,11 +2800,16 @@ func _shield_sparks(s: Node3D, dir: Vector3) -> void:
 
 
 # Shield is down: hot sparks, a puff of smoke and a chunk of hull.
-func _hull_hit(s: Node3D, dir: Vector3) -> void:
+var ar_seen = {}
+var spark_cd = {}
+
+
+func _hull_hit(s, dir: Vector3) -> void:
 	if s == null:
 		return
 	var d = dir.normalized() if dir.length() > 0.001 else Vector3.UP
 	var at = s.position + d * SHIP_R
+	s.add_scorch(d, t)
 	_sparks(at, d, 16, Color(1.0, 0.6, 0.2), 45.0)
 	_pop(at, 2.5, Color(1.0, 0.5, 0.1))
 	_puff(at, 2.2, 1.0, false, true)
@@ -4278,6 +4296,7 @@ func _my_shield(from_point: Vector3) -> void:
 	if players.has(my_id) and players[my_id].hp <= 0:
 
 		_pop(me.position + (from_point - me.position).normalized() * 3.0, 3.5, Color(1.0, 0.7, 0.2))
+		_hull_hit(me, from_point - me.position)
 		return
 	var d = (from_point - me.position).normalized()
 	me.shield_hit(d)
