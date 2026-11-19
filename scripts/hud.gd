@@ -459,7 +459,11 @@ func _draw_play(w: float, h: float, cx: float) -> void:
 	if m.comm != null:
 		_draw_comm(Vector2(40, h - 320))
 	if me != null and not me.alive:
-		if dm and mine != null and mine.lives <= 0:
+		if m.spectators.has(m.my_id):
+			txt("SPECTATING", Vector2(cx, h * 0.2), 70, Color(0.75, 0.6, 1.0), true)
+			var wname = m.players[m.spec_target].name if m.players.has(m.spec_target) else "nobody"
+			txt("you fly in the next round  -  watching %s  -  click to switch  -  ESC twice to leave" % wname, Vector2(cx, h * 0.2 + 46), 30, Color.WHITE, true)
+		elif dm and mine != null and mine.lives <= 0:
 			txt("YOU ARE OUT", Vector2(cx, h * 0.2), 70, Color(1, 0.3, 0.2), true)
 			var sname = m.players[m.spec_target].name if m.players.has(m.spec_target) else "nobody"
 			txt("watching %s  -  click to watch someone else  -  ESC twice to leave" % sname, Vector2(cx, h * 0.2 + 46), 30, Color.WHITE, true)

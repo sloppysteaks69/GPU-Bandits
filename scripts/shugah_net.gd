@@ -18,6 +18,7 @@ signal hosted(code: String)
 signal joined()
 signal failed(msg: String)
 signal progress(msg: String)
+signal games_listed(games: Array, err: String)
 
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 const CONNECT_TIMEOUT = 25.0
@@ -42,6 +43,49 @@ var wait_t = 0.0
 var connected = false
 var http: HTTPRequest
 var host_retry = 0
+var list_http: HTTPRequest
+var info_last = {}
+var info_dirty = {}
+var info_t = 0.0
+const INFO_GAP = 4.0         # the host updates its game-list row at most this often
+
+
+# Ask for the list of open games (one request; the player presses REFRESH for more).
+func list_games() -> void:
+	if server_url.strip_edges() == "":
+		games_listed.emit([], "Set the Shugah Net server address first.")
+		return
+	if list_http == null:
+		list_http = HTTPRequest.new()
+		list_http.timeout = 10.0
+		add_child(list_http)
+		list_http.request_completed.connect(_on_list)
+	list_http.cancel_request()
+	var h = PackedStringArray(["X-Shugah-Client: " + client_tag])
+	if app_key != "":
+		h.append("X-Shugah-Key: " + app_key)
+	if list_http.request(_base() + "/api/games", h) != OK:
+		games_listed.emit([], "Could not reach Shugah Net.")
+
+
+func _on_list(result: int, status: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS or status != 200:
+		games_listed.emit([], "Shugah Net is not answering.")
+		return
+	var d = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(d) != TYPE_DICTIONARY or typeof(d.get("games")) != TYPE_ARRAY:
+		games_listed.emit([], "Shugah Net sent a bad game list.")
+		return
+	games_listed.emit(d.games, "")
+
+
+# Host: what the game list should say about this game. Sent only when it changes, and at most
+# every INFO_GAP seconds, to stay far inside the free plan.
+func update_info(info: Dictionary) -> void:
+	if not is_host or mode != "host":
+		return
+	if info != info_last:
+		info_dirty = info.duplicate()
 
 
 func available() -> bool:
@@ -101,6 +145,9 @@ func _reset() -> void:
 	rtc = null
 	mode = ""
 	connected = false
+	info_last = {}
+	info_dirty = {}
+	info_t = 0.0
 	my_peer = ""
 	host_peer = ""
 	net_id = 0
@@ -198,6 +245,14 @@ func _send(msg: Dictionary) -> void:
 
 
 func _process(dt: float) -> void:
+	info_t -= dt
+	if not info_dirty.is_empty() and info_t <= 0.0 and ws_open and is_host:
+		info_last = info_dirty
+		info_dirty = {}
+		info_t = INFO_GAP
+		var m = info_last.duplicate()
+		m["type"] = "set_info"
+		_send(m)
 	if ws != null:
 		ws.poll()
 		var st = ws.get_ready_state()

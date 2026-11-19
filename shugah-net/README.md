@@ -15,6 +15,7 @@ Shugah Net is the anonymous lobby and signaling service behind GPU Bandits' **SH
 
   Players only ever see Cloudflare's addresses.
 - Gameplay goes straight over WebRTC data channels through Cloudflare TURN, never through the Worker. Godot's `WebRTCMultiplayerPeer` provides a reliable ordered channel and unreliable channels, and the game's normal RPCs run on top.
+- `GET /api/games` lists open lobbies (name, mode, player count, in lobby or playing) from a small Directory Durable Object, so players can pick a game instead of typing a code. The host updates its entry every few seconds and removes it when it leaves; entries older than 12 hours are dropped. Players who join a game in progress spectate until the next round.
 - A client closes its signaling socket as soon as it is connected. The host keeps its socket open while it hosts, so new players can still join.
 
 ### Cost
@@ -42,6 +43,7 @@ TURN usage is billed separately by Cloudflare Realtime, and its free allowance i
    ```
    npx wrangler deploy
    ```
+   If you deployed 1.2.0 before, run `npx wrangler deploy` again for 1.2.1: it adds the game list (migration v2).
    Wrangler prints the address, for example `https://shugah-net.<your-subdomain>.workers.dev`.
 5. In the game, open SHUGAH NET ONLINE and paste that address into **Shugah Net server**. It is remembered.
    - To build it in instead, set `SHUGAH_URL` near the top of the Shugah Net section in `scripts/main.gd`.
@@ -74,7 +76,7 @@ Lobby sockets work locally with no secrets: `ws://localhost:8787/api/lobby/ABC23
 | DO → host | `{"type":"peer_joined","peer_id","net_id"}` |
 | host ↔ client | `sdp_offer` / `sdp_answer` `{target_id, sdp}`, `ice_candidate` `{target_id, candidate, mid, index}`. Relayed with `from_id` and scrubbed. |
 | client → DO | `{"type":"p2p_ready"}`, then the client closes its socket |
-| host → DO | `{"type":"peer_left","net_id"}` (frees a slot), `{"type":"set_state","state":"OPEN"|"IN_GAME"}` |
+| host → DO | `{"type":"peer_left","net_id"}` (frees a slot), `{"type":"set_state","state":"OPEN"|"IN_GAME"}`, `{"type":"set_info","info":{name,mode,players,playing,ver}}` (game list entry) |
 | DO → anyone | `{"type":"error","error":"no_such_lobby"|"lobby_full"|"code_in_use"|...}`, `host_left`, `peer_left` |
 
 The maximum is 15 players per lobby: 1 host and 14 clients.

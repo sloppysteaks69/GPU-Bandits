@@ -2,6 +2,7 @@
 //
 //   POST /api/turn-credentials   -> short-lived Cloudflare Realtime TURN ice servers (4 h)
 //   GET  /api/lobby/:code        -> WebSocket to that lobby's Durable Object (LobbyDO)
+//   GET  /api/games              -> list of open games (one Directory DO, updated by hosts)
 //
 // The Worker never carries gameplay. A lobby DO only matches players and relays a few
 // signaling messages (offer / answer / relay ICE candidates) per join, using the WebSocket
@@ -10,6 +11,7 @@
 
 export interface Env {
   LOBBY: DurableObjectNamespace;
+  DIRECTORY: DurableObjectNamespace;
   TURN_KEY_ID: string;
   TURN_API_TOKEN: string;
   APP_KEY?: string;
@@ -74,6 +76,14 @@ export default {
       if (await limited(env.LOBBY_LIMIT, clientIp(req))) return json({ error: "slow_down" }, 429, { "retry-after": "60" });
       const stub = env.LOBBY.get(env.LOBBY.idFromName(code));
       return stub.fetch(req);
+    }
+
+    if (url.pathname === "/api/games") {
+      if (req.method !== "GET") return json({ error: "method" }, 405);
+      if (!keyOk(req, env)) return json({ error: "forbidden" }, 403);
+      if (await limited(env.LOBBY_LIMIT, clientIp(req))) return json({ error: "slow_down" }, 429, { "retry-after": "60" });
+      const dir = env.DIRECTORY.get(env.DIRECTORY.idFromName("directory"));
+      return dir.fetch("https://dir/list");
     }
 
     if (url.pathname === "/" || url.pathname === "/health") return json({ ok: true, service: "shugah-net" });
@@ -155,8 +165,11 @@ export class LobbyDO {
   ctx: DurableObjectState;
   sql: SqlStorage;
 
-  constructor(ctx: DurableObjectState, _env: Env) {
+  env: Env;
+
+  constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
+    this.env = env;
     this.sql = ctx.storage.sql;
     this.sql.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
   }
@@ -171,12 +184,14 @@ export class LobbyDO {
   }
 
   async wipe(): Promise<void> {
-    // every row goes; the empty table stays so this object can host the next lobby
-    this.sql.exec("DELETE FROM meta");
+    // every row goes (except this lobby's own code); the empty table stays for the next lobby
+    this.sql.exec("DELETE FROM meta WHERE k != 'code'");
   }
 
   async fetch(req: Request): Promise<Response> {
     if (this.ctx.getWebSockets().length >= MAX_PLAYERS + 2) return json({ error: "full" }, 503);
+    const m = new URL(req.url).pathname.match(/\/api\/lobby\/([A-Za-z0-9]{6})$/);
+    if (m) this.set("code", m[1].toUpperCase());
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server); // hibernatable: no listeners, no timers
@@ -261,6 +276,21 @@ export class LobbyDO {
       return;
     }
 
+    if (msg.type === "set_info" && me.role === "host") {
+      // what the game list shows: host name, mode, player count, lobby or playing, version
+      const info = {
+        code: this.get("code") ?? "",
+        name: String(msg.name ?? "").slice(0, 32),
+        mode: String(msg.mode ?? "").slice(0, 24),
+        players: Math.max(0, Math.min(MAX_PLAYERS, Number(msg.players) || 0)),
+        max: MAX_PLAYERS,
+        playing: !!msg.playing,
+        ver: String(msg.ver ?? "").slice(0, 16),
+      };
+      if (info.code) await this.dir("put", info);
+      return;
+    }
+
     if (msg.type === "set_state" && me.role === "host") {
       if (msg.state === "OPEN" || msg.state === "IN_GAME") this.set("state", msg.state);
       return;
@@ -271,6 +301,13 @@ export class LobbyDO {
       this.set("ready", String(Math.max(0, Number(this.get("ready") ?? "0") - 1)));
       return;
     }
+  }
+
+  async dir(op: "put" | "del", body: Record<string, unknown>): Promise<void> {
+    try {
+      const d = this.env.DIRECTORY.get(this.env.DIRECTORY.idFromName("directory"));
+      await d.fetch("https://dir/" + op, { method: "POST", body: JSON.stringify(body) });
+    } catch { /* the list is best-effort */ }
   }
 
   fail(ws: WebSocket, error: string): void {
@@ -299,11 +336,63 @@ export class LobbyDO {
           try { w.close(1000, "host_left"); } catch { /* ignore */ }
         }
       }
+      const code = this.get("code");
+      if (code) await this.dir("del", { code });
       await this.wipe();
       return;
     }
     const host_id = this.get("host_id");
     const host = host_id ? this.find(host_id) : null;
     if (host) this.send(host, { type: "peer_left", peer_id: me.peer_id, net_id: me.net_id });
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Directory: one Durable Object holding the list of open games. Hosts' lobbies put / delete
+// their row; players read the list when they open JOIN A GAME (no polling, no timers).
+
+const STALE_MS = 12 * 3600 * 1000;
+
+export class Directory {
+  ctx: DurableObjectState;
+  sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, _env: Env) {
+    this.ctx = ctx;
+    this.sql = ctx.storage.sql;
+    this.sql.exec(
+      "CREATE TABLE IF NOT EXISTS games (code TEXT PRIMARY KEY, name TEXT, mode TEXT, players INTEGER, max INTEGER, playing INTEGER, ver TEXT, updated INTEGER)",
+    );
+  }
+
+  async fetch(req: Request): Promise<Response> {
+    const op = new URL(req.url).pathname;
+    if (op === "/list") {
+      this.sql.exec("DELETE FROM games WHERE updated < ?", Date.now() - STALE_MS);
+      const games = this.sql
+        .exec("SELECT code, name, mode, players, max, playing, ver FROM games ORDER BY updated DESC LIMIT 100")
+        .toArray()
+        .map((r) => ({ ...r, playing: !!r.playing }));
+      return json({ games });
+    }
+    let b: any;
+    try { b = await req.json(); } catch { return json({ error: "bad_json" }, 400); }
+    const code = String(b.code ?? "").toUpperCase();
+    if (!CODE_RE.test(code)) return json({ error: "bad_code" }, 400);
+    if (op === "/put") {
+      this.sql.exec(
+        "INSERT INTO games (code, name, mode, players, max, playing, ver, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(code) DO UPDATE SET name = excluded.name, mode = excluded.mode, players = excluded.players, " +
+          "max = excluded.max, playing = excluded.playing, ver = excluded.ver, updated = excluded.updated",
+        code, String(b.name ?? ""), String(b.mode ?? ""), Number(b.players) || 0, Number(b.max) || MAX_PLAYERS,
+        b.playing ? 1 : 0, String(b.ver ?? ""), Date.now(),
+      );
+      return json({ ok: true });
+    }
+    if (op === "/del") {
+      this.sql.exec("DELETE FROM games WHERE code = ?", code);
+      return json({ ok: true });
+    }
+    return json({ error: "not_found" }, 404);
   }
 }

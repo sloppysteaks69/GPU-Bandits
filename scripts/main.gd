@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.2.0"
+const VERSION = "1.2.1"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -918,24 +918,43 @@ func _build_ui() -> void:
 	online_box.add_theme_constant_override("separation", 8)
 	box.add_child(online_box)
 	sn.pressed.connect(func(): online_box.visible = not online_box.visible)
-	code_edit = _field(online_box, "Lobby code (6 letters) - blank to host a new lobby", "")
-	code_edit.max_length = 6
 	var orow = HBoxContainer.new()
 	orow.add_theme_constant_override("separation", 14)
 	online_box.add_child(orow)
 	var ohb = Button.new()
-	ohb.text = "HOST ONLINE"
+	ohb.text = "HOST A GAME ON SHUGAH NET"
 	ohb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	ohb.add_theme_font_size_override("font_size", 26)
+	ohb.add_theme_font_size_override("font_size", 24)
 	ohb.pressed.connect(_on_host_online)
 	orow.add_child(ohb)
 	var ojb = Button.new()
-	ojb.text = "JOIN ONLINE"
+	ojb.text = "JOIN A GAME"
 	ojb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	ojb.add_theme_font_size_override("font_size", 26)
-	ojb.pressed.connect(_on_join_online)
+	ojb.add_theme_font_size_override("font_size", 24)
+	ojb.pressed.connect(_on_browse_online)
 	orow.add_child(ojb)
-	code_edit.text_submitted.connect(func(_s): _on_join_online())
+	games_box = VBoxContainer.new()
+	games_box.visible = false
+	games_box.add_theme_constant_override("separation", 6)
+	online_box.add_child(games_box)
+	var gl = Label.new()
+	gl.text = "OPEN GAMES  (games already running: you watch until the next round)"
+	gl.add_theme_font_size_override("font_size", 18)
+	gl.add_theme_color_override("font_color", Color(1.0, 0.8, 0.3))
+	games_box.add_child(gl)
+	var gscroll = ScrollContainer.new()
+	gscroll.custom_minimum_size = Vector2(0, 220)
+	gscroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	games_box.add_child(gscroll)
+	games_list = VBoxContainer.new()
+	games_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	games_list.add_theme_constant_override("separation", 4)
+	gscroll.add_child(games_list)
+	var rb = Button.new()
+	rb.text = "REFRESH"
+	rb.add_theme_font_size_override("font_size", 20)
+	rb.pressed.connect(_on_browse_online)
+	games_box.add_child(rb)
 	server_edit = _field(online_box, "Shugah Net server", str(_user_get("shugah_url", SHUGAH_URL)))
 	server_edit.max_length = 120
 	server_edit.add_theme_font_size_override("font_size", 20)
@@ -1015,7 +1034,9 @@ const SHUGAH_URL = ""
 const ShugahNet = preload("res://scripts/shugah_net.gd")
 var shugah: Node
 var online_box: VBoxContainer
-var code_edit: LineEdit
+var games_box: VBoxContainer
+var games_list: VBoxContainer
+var spectators = {}
 var server_edit: LineEdit
 var online = false
 
@@ -1027,6 +1048,7 @@ func _shugah() -> Node:
 		shugah.hosted.connect(_on_online_hosted)
 		shugah.failed.connect(_on_online_failed)
 		shugah.progress.connect(func(m): status = m)
+		shugah.games_listed.connect(_on_games_listed)
 	shugah.server_url = server_edit.text.strip_edges() if server_edit != null else SHUGAH_URL
 	shugah.client_tag = "gpu-bandits/" + VERSION
 	return shugah
@@ -1048,19 +1070,56 @@ func _online_ready() -> bool:
 
 
 func _on_host_online() -> void:
-	if code_edit != null and code_edit.text.strip_edges() != "":
-		_on_join_online()
-		return
 	if not _online_ready():
 		return
 	online = true
 	_shugah().host_lobby()
 
 
-func _on_join_online() -> void:
-	var c = code_edit.text.strip_edges().to_upper() if code_edit != null else ""
+func _on_browse_online() -> void:
+	if not _online_ready():
+		return
+	games_box.visible = true
+	for c in games_list.get_children():
+		c.queue_free()
+	var l = Label.new()
+	l.text = "Looking for games..."
+	l.add_theme_font_size_override("font_size", 20)
+	games_list.add_child(l)
+	_shugah().list_games()
+
+
+func _on_games_listed(games: Array, err: String) -> void:
+	if games_list == null:
+		return
+	for c in games_list.get_children():
+		c.queue_free()
+	if err != "" or games.is_empty():
+		var l = Label.new()
+		l.text = err if err != "" else "No open games right now. Host one!"
+		l.add_theme_font_size_override("font_size", 20)
+		games_list.add_child(l)
+		return
+	for g in games:
+		var b = Button.new()
+		var same = str(g.get("ver", "")) == VERSION
+		var full = int(g.get("players", 0)) >= int(g.get("max", 15))
+		var where = "PLAYING - join to watch" if g.get("playing", false) else "IN LOBBY"
+		b.text = "%s    %s    %d/%d    %s" % [str(g.get("name", "?")), str(g.get("mode", "")), int(g.get("players", 0)), int(g.get("max", 15)), where]
+		if not same:
+			b.text += "    (needs v%s)" % str(g.get("ver", "?"))
+		elif full:
+			b.text += "    FULL"
+		b.disabled = not same or full
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.add_theme_font_size_override("font_size", 20)
+		b.pressed.connect(_on_join_online.bind(str(g.get("code", ""))))
+		games_list.add_child(b)
+
+
+func _on_join_online(c: String) -> void:
+	c = c.strip_edges().to_upper()
 	if c.length() != 6:
-		status = "Type the 6-letter lobby code the host sees."
 		return
 	if not _online_ready():
 		return
@@ -1162,6 +1221,7 @@ func _leave_to_menu(why: String) -> void:
 
 func _drop_to_menu() -> void:
 	multiplayer.multiplayer_peer = null
+	spectators.clear()
 	online = false
 	if shugah != null:
 		shugah.close()
@@ -1271,15 +1331,31 @@ func c_hello(pname: String, ver: String) -> void:
 		clean = "Pilot %d" % (col + 1)
 	d[id] = [clean, col % MAX_PLAYERS]
 	hostp[id] = {"alive": true, "respawn": 0.0, "protect": 3.0}
-	if state == PLAYING and game_mode == MODE_DM:
-		# A deathmatch is already running: the newcomer watches and plays the next round.
+	var late = state == PLAYING or state == RESULTS
+	if late:
+		# A match is already running: the newcomer watches and plays the next round.
 		hostp[id] = {"alive": false, "respawn": INF, "protect": 0.0, "out": true}
 	rpc("ev_lobby_size", lobby_max)
 	rpc("ev_mode", game_mode)
 	rpc("ev_roster", d)
+	if late:
+		rpc("ev_spectator", id)
 	if state == PLAYING and game_mode == MODE_DM and players.has(id):
 		players[id].lives = 0
 	print("GB_JOINED:%s id=%d" % [clean, id])
+
+
+@rpc("authority", "call_local", "reliable")
+func ev_spectator(id: int) -> void:
+	spectators[id] = true
+	if id == my_id and ships.has(my_id) and state == PLAYING:
+		ships[my_id].alive = false
+
+
+func _spectating() -> bool:
+	if spectators.has(my_id):
+		return true
+	return game_mode == MODE_DM and players.has(my_id) and players[my_id].lives <= 0
 
 
 func _reject(id: int, msg: String) -> void:
@@ -1403,6 +1479,7 @@ func ev_begin(bname: String, tuning: Dictionary, mode: int) -> void:
 		players[id].lives = DM_LIVES
 		players[id].elim = 0
 		players[id].score = 0
+	spectators.clear()
 	_begin_local()
 
 
@@ -1443,8 +1520,8 @@ func _begin_local() -> void:
 	if players.has(my_id):
 		slot = players[my_id].col
 	_place_me(TAU * slot / float(MAX_PLAYERS))
-	if game_mode == MODE_DM and players.has(my_id) and players[my_id].lives <= 0 and ships.has(my_id):
-		# joined while a deathmatch was running: watch this round
+	if _spectating() and ships.has(my_id):
+		# joined while a match was running: watch this round
 		ships[my_id].alive = false
 
 
@@ -1834,7 +1911,7 @@ func _unhandled_input(e: InputEvent) -> void:
 		_lobby_click(e)
 	elif e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT and state == PLAYING:
 		var me = ships.get(my_id)
-		if me != null and not me.alive and game_mode == MODE_DM and players.has(my_id) and players[my_id].lives <= 0:
+		if me != null and not me.alive and _spectating():
 			spec_target = _next_spectate(spec_target)
 
 
@@ -3486,7 +3563,7 @@ func _camera(dt: float) -> void:
 	if state == PLAYING and s != null:
 		if not s.alive:
 			var wreck_ok = my_wreck != null and is_instance_valid(my_wreck) and not my_wreck.is_queued_for_deletion()
-			var out = game_mode == MODE_DM and players.has(my_id) and players[my_id].lives <= 0
+			var out = _spectating()
 			if out and not wreck_ok:
 				# knocked out of the deathmatch: ride along behind a pilot who is still flying
 				if not _can_spectate(spec_target):
@@ -3644,6 +3721,8 @@ func _say(text: String) -> void:
 
 
 func _host_tick(dt: float) -> void:
+	if online and shugah != null:
+		shugah.update_info({"name": "%s's game" % my_name, "mode": MODE_NAMES[game_mode], "players": players.size(), "playing": state != LOBBY, "ver": VERSION})
 	if state == LOBBY:
 		if autostart >= 0.0:
 			autostart -= dt

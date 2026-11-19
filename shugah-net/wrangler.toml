@@ -9,10 +9,18 @@ compatibility_date = "2026-11-01"
 name = "LOBBY"
 class_name = "LobbyDO"
 
+[[durable_objects.bindings]]
+name = "DIRECTORY"
+class_name = "Directory"
+
 # SQLite-backed Durable Objects are the ones allowed on the Workers Free plan.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["LobbyDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Directory"]
 
 # Per-IP rate limit for TURN credential requests (Workers Rate Limiting binding).
 # 6 credential requests per minute per IP is plenty for a player joining a few lobbies.
