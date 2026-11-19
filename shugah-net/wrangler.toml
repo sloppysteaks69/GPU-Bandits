@@ -1,0 +1,33 @@
+# Shugah Net: lobby + WebRTC signaling for GPU Bandits on the Cloudflare Workers Free plan.
+# Gameplay never passes through here: the Worker only hands out TURN credentials and relays
+# a handful of signaling messages per join, then the game talks over Cloudflare TURN.
+name = "shugah-net"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "LobbyDO"
+
+# SQLite-backed Durable Objects are the ones allowed on the Workers Free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LobbyDO"]
+
+# Per-IP rate limit for TURN credential requests (Workers Rate Limiting binding).
+# 6 credential requests per minute per IP is plenty for a player joining a few lobbies.
+[[ratelimits]]
+name = "TURN_LIMIT"
+namespace_id = "7301"
+simple = { limit = 6, period = 60 }
+
+# Per-IP rate limit for opening lobby sockets.
+[[ratelimits]]
+name = "LOBBY_LIMIT"
+namespace_id = "7302"
+simple = { limit = 20, period = 60 }
+
+# Secrets (set with `wrangler secret put`, never committed):
+#   TURN_KEY_ID      Cloudflare Realtime TURN key id
+#   TURN_API_TOKEN   Cloudflare Realtime TURN API token
+#   APP_KEY          optional: if set, clients must send it in the X-Shugah-Key header

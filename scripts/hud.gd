@@ -263,7 +263,7 @@ func _draw_join_title(w: float, h: float, cx: float) -> void:
 	draw_rect(Rect2(0, 0, w, h), Color(0.0, 0.0, 0.04, 0.4))
 	title("GPU BANDITS", Vector2(cx, h * 0.24), 132)
 	txt("90-second vote by combat  -  v" + m.VERSION, Vector2(cx, h * 0.24 + 64), 34, Color.WHITE, true)
-	var connecting = m.multiplayer.multiplayer_peer is ENetMultiplayerPeer
+	var connecting = m.multiplayer.multiplayer_peer is ENetMultiplayerPeer or m.multiplayer.multiplayer_peer is WebRTCMultiplayerPeer
 	if connecting:
 		heading("JOINING" + ".".repeat(1 + int(m.t * 2.5) % 3), Vector2(cx, h * 0.52), 72, GOLD)
 	else:

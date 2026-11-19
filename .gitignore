@@ -5,3 +5,6 @@ build/
 *.zip
 scalper_config.cfg
 scalper_config.cfg.bad
+
+# webrtc-native GDExtension (download from github.com/godotengine/webrtc-native, see shugah-net/README.md)
+webrtc/

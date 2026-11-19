@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.1.2"
+const VERSION = "1.2.0"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -907,6 +907,44 @@ func _build_ui() -> void:
 	jb.pressed.connect(_on_join_pressed)
 	row.add_child(jb)
 	ip_edit.text_submitted.connect(func(_s): _on_join_pressed())
+	# 1.2.0 Shugah Net Online: internet lobbies by code through Cloudflare, no IPs shared
+	var sn = Button.new()
+	sn.text = "SHUGAH NET ONLINE"
+	sn.add_theme_font_size_override("font_size", 30)
+	sn.add_theme_color_override("font_color", Color(0.75, 0.6, 1.0))
+	box.add_child(sn)
+	online_box = VBoxContainer.new()
+	online_box.visible = false
+	online_box.add_theme_constant_override("separation", 8)
+	box.add_child(online_box)
+	sn.pressed.connect(func(): online_box.visible = not online_box.visible)
+	code_edit = _field(online_box, "Lobby code (6 letters) - blank to host a new lobby", "")
+	code_edit.max_length = 6
+	var orow = HBoxContainer.new()
+	orow.add_theme_constant_override("separation", 14)
+	online_box.add_child(orow)
+	var ohb = Button.new()
+	ohb.text = "HOST ONLINE"
+	ohb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ohb.add_theme_font_size_override("font_size", 26)
+	ohb.pressed.connect(_on_host_online)
+	orow.add_child(ohb)
+	var ojb = Button.new()
+	ojb.text = "JOIN ONLINE"
+	ojb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ojb.add_theme_font_size_override("font_size", 26)
+	ojb.pressed.connect(_on_join_online)
+	orow.add_child(ojb)
+	code_edit.text_submitted.connect(func(_s): _on_join_online())
+	server_edit = _field(online_box, "Shugah Net server", str(_user_get("shugah_url", SHUGAH_URL)))
+	server_edit.max_length = 120
+	server_edit.add_theme_font_size_override("font_size", 20)
+	var on = Label.new()
+	on.text = "Online games go through Cloudflare's relay: nobody sees anybody's IP address\nand nothing needs forwarding on your router."
+	on.add_theme_font_size_override("font_size", 16)
+	on.add_theme_color_override("font_color", Color(0.75, 0.9, 1.0))
+	on.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	online_box.add_child(on)
 	var qb = Button.new()
 	qb.text = "QUIT"
 	qb.add_theme_font_size_override("font_size", 24)
@@ -971,6 +1009,92 @@ func _read_menu() -> bool:
 
 
 
+# ---- Shugah Net Online --------------------------------------------------------------------
+# Put the deployed Worker's address here so players don't have to type it (they still can).
+const SHUGAH_URL = ""
+const ShugahNet = preload("res://scripts/shugah_net.gd")
+var shugah: Node
+var online_box: VBoxContainer
+var code_edit: LineEdit
+var server_edit: LineEdit
+var online = false
+
+
+func _shugah() -> Node:
+	if shugah == null:
+		shugah = ShugahNet.new()
+		add_child(shugah)
+		shugah.hosted.connect(_on_online_hosted)
+		shugah.failed.connect(_on_online_failed)
+		shugah.progress.connect(func(m): status = m)
+	shugah.server_url = server_edit.text.strip_edges() if server_edit != null else SHUGAH_URL
+	shugah.client_tag = "gpu-bandits/" + VERSION
+	return shugah
+
+
+func _online_ready() -> bool:
+	if not _read_menu():
+		return false
+	if server_edit != null:
+		_user_set("shugah_url", server_edit.text.strip_edges())
+	var s = _shugah()
+	if s.server_url == "":
+		status = "Type the Shugah Net server address first."
+		return false
+	if not s.available():
+		status = "This build has no WebRTC support (webrtc folder missing)."
+		return false
+	return true
+
+
+func _on_host_online() -> void:
+	if code_edit != null and code_edit.text.strip_edges() != "":
+		_on_join_online()
+		return
+	if not _online_ready():
+		return
+	online = true
+	_shugah().host_lobby()
+
+
+func _on_join_online() -> void:
+	var c = code_edit.text.strip_edges().to_upper() if code_edit != null else ""
+	if c.length() != 6:
+		status = "Type the 6-letter lobby code the host sees."
+		return
+	if not _online_ready():
+		return
+	online = true
+	reject_msg = ""
+	host_addr = "SHUGAH NET   CODE " + c
+	_shugah().join_lobby(c)
+
+
+func _on_online_hosted(lobby_code: String) -> void:
+	is_host = true
+	my_id = 1
+	state = LOBBY
+	status = ""
+	if arg_mode >= 0:
+		game_mode = arg_mode
+	host_addr = "SHUGAH NET   CODE " + lobby_code
+	print("GB_HOST_ONLINE code=%s mode=%s" % [lobby_code, MODE_NAMES[game_mode]])
+	ev_roster({1: [my_name, 0]})
+	_share_portrait()
+	for i in clampi(arg_bots, 0, lobby_max - 1):
+		_add_bot()
+
+
+func _on_online_failed(msg: String) -> void:
+	online = false
+	status = msg
+	if state != MENU:
+		_drop_to_menu()
+		status = msg
+	else:
+		multiplayer.multiplayer_peer = null
+
+
 func _host() -> void:
 	var peer = ENetMultiplayerPeer.new()
 	var err = peer.create_server(port, lobby_max - 1)
@@ -1009,6 +1133,8 @@ func _join(ip: String) -> void:
 
 
 func _on_connected() -> void:
+	if shugah != null:
+		shugah.on_connected()
 	my_id = multiplayer.get_unique_id()
 	state = LOBBY
 	status = ""
@@ -1036,6 +1162,9 @@ func _leave_to_menu(why: String) -> void:
 
 func _drop_to_menu() -> void:
 	multiplayer.multiplayer_peer = null
+	online = false
+	if shugah != null:
+		shugah.close()
 	for id in ships.keys():
 		ships[id].queue_free()
 	ships.clear()
@@ -1062,6 +1191,8 @@ func _on_peer_connected(_id: int) -> void:
 
 
 func _on_peer_disconnected(id: int) -> void:
+	if is_host and shugah != null and online:
+		shugah.player_left(id)
 	if not is_host or not players.has(id):
 		return
 	var d = {}
