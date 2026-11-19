@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.2.2"
+const VERSION = "1.2.3"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -888,6 +888,15 @@ func _build_ui() -> void:
 	if port == DEFAULT_PORT and saved_port != DEFAULT_PORT:
 		port = saved_port
 	name_edit = _field(box, "Pilot name", str(_user_get("name", my_name)))
+	# 1.2.3: two pages under the pilot name: LAN (IP/port) and Shugah Net Online
+	lan_page = VBoxContainer.new()
+	lan_page.add_theme_constant_override("separation", 10)
+	box.add_child(lan_page)
+	online_box = VBoxContainer.new()
+	online_box.visible = false
+	online_box.add_theme_constant_override("separation", 10)
+	box.add_child(online_box)
+	box = lan_page
 	ip_edit = _field(box, "Host IP to join (blank = first game found on your LAN)", str(_user_get("ip", "")))
 	port_edit = _field(box, "Port (UDP) - the host picks it, joiners type the same one", str(port))
 	port_edit.max_length = 5
@@ -913,11 +922,13 @@ func _build_ui() -> void:
 	sn.add_theme_font_size_override("font_size", 30)
 	sn.add_theme_color_override("font_color", Color(0.75, 0.6, 1.0))
 	box.add_child(sn)
-	online_box = VBoxContainer.new()
-	online_box.visible = false
-	online_box.add_theme_constant_override("separation", 8)
-	box.add_child(online_box)
-	sn.pressed.connect(func(): online_box.visible = not online_box.visible)
+	sn.pressed.connect(func(): _show_online_page(true))
+	var ot = Label.new()
+	ot.text = "SHUGAH NET ONLINE"
+	ot.add_theme_font_size_override("font_size", 34)
+	ot.add_theme_color_override("font_color", Color(0.75, 0.6, 1.0))
+	ot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	online_box.add_child(ot)
 	var orow = HBoxContainer.new()
 	orow.add_theme_constant_override("separation", 14)
 	online_box.add_child(orow)
@@ -956,8 +967,12 @@ func _build_ui() -> void:
 	rb.pressed.connect(_on_browse_online)
 	games_box.add_child(rb)
 	var saved_url := str(_user_get("shugah_url", "")).strip_edges()
-	server_edit = _field(online_box, "Shugah Net server", saved_url if saved_url != "" else SHUGAH_URL)
+	# 1.2.2 and older cut the saved address to 40 characters; drop a cut-off copy of the built-in one
+	if saved_url == "" or (saved_url != SHUGAH_URL and SHUGAH_URL.begins_with(saved_url)):
+		saved_url = SHUGAH_URL
+	server_edit = _field(online_box, "Shugah Net server", "")
 	server_edit.max_length = 120
+	server_edit.text = saved_url
 	server_edit.add_theme_font_size_override("font_size", 20)
 	var on = Label.new()
 	on.text = "Online games go through Cloudflare's relay: nobody sees anybody's IP address\nand nothing needs forwarding on your router."
@@ -965,6 +980,11 @@ func _build_ui() -> void:
 	on.add_theme_color_override("font_color", Color(0.75, 0.9, 1.0))
 	on.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	online_box.add_child(on)
+	var bb = Button.new()
+	bb.text = "BACK"
+	bb.add_theme_font_size_override("font_size", 24)
+	bb.pressed.connect(func(): _show_online_page(false))
+	online_box.add_child(bb)
 	var qb = Button.new()
 	qb.text = "QUIT"
 	qb.add_theme_font_size_override("font_size", 24)
@@ -976,6 +996,13 @@ func _build_ui() -> void:
 	note.add_theme_color_override("font_color", Color(0.75, 0.9, 1.0))
 	note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(note)
+
+
+func _show_online_page(on: bool) -> void:
+	lan_page.visible = not on
+	online_box.visible = on
+	if on and games_box != null and not games_box.visible:
+		_on_browse_online()
 
 
 func _field(parent: Control, label: String, value: String) -> LineEdit:
@@ -1035,6 +1062,7 @@ const SHUGAH_URL = "https://shugah-net.quantum-slipstream.workers.dev"
 const ShugahNet = preload("res://scripts/shugah_net.gd")
 var shugah: Node
 var online_box: VBoxContainer
+var lan_page: VBoxContainer
 var games_box: VBoxContainer
 var games_list: VBoxContainer
 var spectators = {}

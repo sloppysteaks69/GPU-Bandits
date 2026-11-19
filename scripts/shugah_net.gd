@@ -70,7 +70,7 @@ func list_games() -> void:
 
 func _on_list(result: int, status: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	if result != HTTPRequest.RESULT_SUCCESS or status != 200:
-		games_listed.emit([], "Shugah Net is not answering.")
+		games_listed.emit([], "Shugah Net is not answering (%s)." % ("HTTP %d" % status if result == HTTPRequest.RESULT_SUCCESS else "no connection, code %d" % result))
 		return
 	var d = JSON.parse_string(body.get_string_from_utf8())
 	if typeof(d) != TYPE_DICTIONARY or typeof(d.get("games")) != TYPE_ARRAY:
@@ -199,7 +199,7 @@ func _on_turn(result: int, status: int, _headers: PackedStringArray, body: Packe
 	if mode == "":
 		return
 	if result != HTTPRequest.RESULT_SUCCESS or status != 200:
-		_fail("Shugah Net is not answering (%s)." % ("HTTP %d" % status if result == HTTPRequest.RESULT_SUCCESS else "no connection"))
+		_fail("Shugah Net is not answering (%s)." % ("HTTP %d" % status if result == HTTPRequest.RESULT_SUCCESS else "no connection, code %d" % result))
 		return
 	var d = JSON.parse_string(body.get_string_from_utf8())
 	if typeof(d) != TYPE_DICTIONARY or not d.has("iceServers"):
