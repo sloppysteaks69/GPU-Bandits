@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.2.1"
+const VERSION = "1.2.2"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -955,7 +955,8 @@ func _build_ui() -> void:
 	rb.add_theme_font_size_override("font_size", 20)
 	rb.pressed.connect(_on_browse_online)
 	games_box.add_child(rb)
-	server_edit = _field(online_box, "Shugah Net server", str(_user_get("shugah_url", SHUGAH_URL)))
+	var saved_url := str(_user_get("shugah_url", "")).strip_edges()
+	server_edit = _field(online_box, "Shugah Net server", saved_url if saved_url != "" else SHUGAH_URL)
 	server_edit.max_length = 120
 	server_edit.add_theme_font_size_override("font_size", 20)
 	var on = Label.new()
@@ -1030,7 +1031,7 @@ func _read_menu() -> bool:
 
 # ---- Shugah Net Online --------------------------------------------------------------------
 # Put the deployed Worker's address here so players don't have to type it (they still can).
-const SHUGAH_URL = ""
+const SHUGAH_URL = "https://shugah-net.quantum-slipstream.workers.dev"
 const ShugahNet = preload("res://scripts/shugah_net.gd")
 var shugah: Node
 var online_box: VBoxContainer
@@ -1049,7 +1050,7 @@ func _shugah() -> Node:
 		shugah.failed.connect(_on_online_failed)
 		shugah.progress.connect(func(m): status = m)
 		shugah.games_listed.connect(_on_games_listed)
-	shugah.server_url = server_edit.text.strip_edges() if server_edit != null else SHUGAH_URL
+	shugah.server_url = server_edit.text.strip_edges() if server_edit != null and server_edit.text.strip_edges() != "" else SHUGAH_URL
 	shugah.client_tag = "gpu-bandits/" + VERSION
 	return shugah
 
