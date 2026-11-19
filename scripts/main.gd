@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.1.1"
+const VERSION = "1.1.2"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -5299,8 +5299,10 @@ func _home(sh: Dictionary, dt: float) -> void:
 #   CANNON      the old gold pulse volley        9 x 12 dmg every 1.7 s        ~64 dps, bursty
 #   PDC GUNS    point-defence machine guns       4 dmg, 16 rounds/s            ~64 dps, short range
 #   TWIN LASERS the red turret bolts, 2 at once  2 x 12 dmg every 0.38 s       ~63 dps
-#   LASER LANCE the pink aces' charged beam      0.35 s charge, 0.7 s beam, 2.4 s cycle,
-#                                                hits instantly, ~64 dps averaged
+#   LASER LANCE the pink aces' charged beam      hold to charge (0.3 s .. 2.5 s), let go to
+#                                                fire a 0.7 s beam; longer charge = more damage
+#                                                and a wider, brighter beam. ~64 dps averaged,
+#                                                +40% bonus at full charge for the risk.
 # Bots never roll the lance. Buffs work on all four (rapid fire halves the gaps, overcharge +50%).
 const WPN_CANNON = 0
 const WPN_PDC = 1
@@ -5315,11 +5317,14 @@ const TWIN_GAP = 0.38
 const TWIN_DMG = 12
 const TWIN_SPEED = 330.0
 const TWIN_LIFE = 1.4
-const LANCE_CHARGE = 0.35
+const LANCE_MIN = 0.3
+const LANCE_MAX = 2.5
+const LANCE_HOLD = 2.0     # can sit at full charge this long, then it fires by itself
 const LANCE_FIRE = 0.7
-const LANCE_CYCLE = 2.4
+const LANCE_COOL = 0.6
 const LANCE_LEN = 300.0
-const LANCE_DPS = 220.0
+const LANCE_AVG_DPS = 64.0
+const LANCE_FULL_BONUS = 0.4
 var weapons = {}
 var lances = {}
 var pdc_gun_cd = 0.0
@@ -5375,10 +5380,16 @@ func _fire_weapon(s, wk: int, firing: bool, dt: float) -> void:
 			rpc("fx_fire", l, r, dir)
 			_sfx_pitched(sfx_enemy_lasers, 1.0, -6.0)
 	elif wk == WPN_LANCE:
-		if firing and volley_cd <= 0.0 and not lances.has(my_id):
-			volley_cd = LANCE_CYCLE * _gun_k(my_id)
-			_start_lance(my_id)
-			rpc("fx_lance")
+		var lb = lances.get(my_id)
+		if lb == null:
+			if firing and volley_cd <= 0.0:
+				_start_lance(my_id)
+				rpc("fx_lance")
+		elif lb.phase == 0 and lb.t >= LANCE_MIN and (not firing or lb.t >= LANCE_MAX + LANCE_HOLD):
+			var k = clampf((lb.t - LANCE_MIN) / (LANCE_MAX - LANCE_MIN), 0.0, 1.0)
+			volley_cd = LANCE_FIRE + LANCE_COOL * _gun_k(my_id)
+			_fire_lance(my_id, k)
+			rpc("fx_lance_fire", k)
 
 
 func _sfx_pitched(list: Array, pitch: float, db: float) -> void:
@@ -5399,6 +5410,12 @@ func fx_lance() -> void:
 		_start_lance(multiplayer.get_remote_sender_id())
 
 
+@rpc("any_peer", "call_remote", "reliable")
+func fx_lance_fire(k: float) -> void:
+	if state == PLAYING:
+		_fire_lance(multiplayer.get_remote_sender_id(), clampf(k, 0.0, 1.0))
+
+
 func _start_lance(id: int) -> void:
 	if state != PLAYING or lances.has(id) or not ships.has(id):
 		return
@@ -5406,12 +5423,30 @@ func _start_lance(id: int) -> void:
 	add_child(node)
 	if sfx_ace_beam == null:
 		sfx_ace_beam = _load_sound("res://sounds/ace_beam.ogg")
+	node.beam_color = Color(0.7, 0.3, 1.0)
 	node.build(sfx_ace_beam if sfx_ace_beam != null else sfx_beam)
-	lances[id] = {"t": 0.0, "node": node, "acc": 0.0}
+	node.enable_arcs(Color(0.55, 0.8, 1.0))
+	node.orb_size = 1.8
+	# phase 0 = charging (t counts up while the button is held), 1 = firing (t counts the beam)
+	lances[id] = {"t": 0.0, "node": node, "acc": 0.0, "phase": 0, "k": 0.0, "dps": 0.0}
+
+
+func _fire_lance(id: int, k: float) -> void:
+	var bm = lances.get(id)
+	if bm == null or bm.phase != 0:
+		return
+	var charge_t = LANCE_MIN + (LANCE_MAX - LANCE_MIN) * k
+	bm.phase = 1
+	bm.k = k
+	bm.t = 0.0
+	# whole charge-fire-cool cycle pays out at the average dps, plus a bonus for a full charge
+	bm.dps = LANCE_AVG_DPS * (charge_t + LANCE_FIRE + LANCE_COOL) * (1.0 + LANCE_FULL_BONUS * k * k) / LANCE_FIRE
+	bm.node.beam_radius = 0.45 + 1.35 * k
+	bm.node.power = 0.8 + 1.8 * k
 
 
 # How far the lance reaches before it hits something it would damage, or a wall.
-func _lance_len(owner: int, nose: Vector3, fwd: Vector3) -> float:
+func _lance_len(owner: int, nose: Vector3, fwd: Vector3, extra_r: float = 0.0) -> float:
 	var best = _beam_stop(nose, fwd, LANCE_LEN)
 	var dm = game_mode == MODE_DM
 	for oid in ships:
@@ -5426,7 +5461,7 @@ func _lance_len(owner: int, nose: Vector3, fwd: Vector3) -> float:
 		var along = (o.position - nose).dot(fwd)
 		if along < 0.0 or along > best + 6.0:
 			continue
-		if (nose + fwd * along).distance_to(o.position) < SHIP_R * (2.0 if oid <= ENEMY_BASE else 1.0):
+		if (nose + fwd * along).distance_to(o.position) < SHIP_R * (2.0 if oid <= ENEMY_BASE else 1.0) + extra_r:
 			best = along
 	if not dm:
 		for i in boss.parts.size():
@@ -5436,7 +5471,7 @@ func _lance_len(owner: int, nose: Vector3, fwd: Vector3) -> float:
 			var al = (pt.pos - nose).dot(fwd)
 			if al < 0.0 or al > best + 6.0:
 				continue
-			if (nose + fwd * al).distance_to(pt.pos) < pt.r:
+			if (nose + fwd * al).distance_to(pt.pos) < pt.r + extra_r:
 				best = maxf(0.0, al - pt.r * 0.5)
 	return best
 
@@ -5446,21 +5481,26 @@ func _tick_lances(dt: float) -> void:
 		var bm = lances[id]
 		var s = ships.get(id)
 		bm.t += dt
-		if s == null or not s.alive or state != PLAYING or bm.t > LANCE_CHARGE + LANCE_FIRE:
+		# a remote pilot's charge that never got its fire message (lost / they died) times out
+		var stale = bm.phase == 0 and bm.t > LANCE_MAX + LANCE_HOLD + 1.5
+		if s == null or not s.alive or state != PLAYING or stale or (bm.phase == 1 and bm.t > LANCE_FIRE):
 			bm.node.queue_free()
 			lances.erase(id)
 			continue
 		var fwd = (-s.basis.z).normalized()
 		var nose = s.position + fwd * 4.0
 		bm.node.global_transform = Transform3D(Basis.looking_at(fwd, Vector3.UP if absf(fwd.y) < 0.98 else Vector3.RIGHT), nose)
-		if bm.t < LANCE_CHARGE:
-			bm.node.show_charge(bm.t / LANCE_CHARGE, dt)
+		if bm.phase == 0:
+			var ck = clampf(bm.t / LANCE_MAX, 0.0, 1.0)
+			if bm.t > LANCE_MAX:
+				ck = 1.0 + 0.06 * sin(bm.t * 40.0)
+			bm.node.show_charge(ck, dt)
 			continue
-		var best = _lance_len(id, nose, fwd)
-		bm.node.show_fire(1.0 - (bm.t - LANCE_CHARGE) / LANCE_FIRE, best, best < LANCE_LEN - 0.5, dt)
+		var best = _lance_len(id, nose, fwd, bm.node.beam_radius * 1.5)
+		bm.node.show_fire(1.0 - bm.t / LANCE_FIRE, best, best < LANCE_LEN - 0.5, dt)
 		if id != my_id or best >= LANCE_LEN - 0.5:
 			continue
-		bm.acc += LANCE_DPS * (POWER_DMG_K if has_buff(id, BUFF_POWER) else 1.0) * dt
+		bm.acc += bm.dps * (POWER_DMG_K if has_buff(id, BUFF_POWER) else 1.0) * dt
 		if bm.acc < 6.0:
 			continue
 		var n = int(bm.acc)
