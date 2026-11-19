@@ -85,8 +85,7 @@ func build(c: Color, is_elite: bool = false) -> void:
 	Lib.prism(root, Vector3(12.0, 5.5, 0.35), Vector3(0, -0.2, 1.6), tint, Vector3(-PI / 2, 0, 0))
 	canard = Lib.prism(root, Vector3(4.5, 1.8, 0.25), Vector3(0, 0.1, -2.6), dark, Vector3(-PI / 2, 0, 0))
 	paint = [[hull, Color(0.9, 0.92, 0.96)], [tint, c]]
-	var canopy = Lib.ball(root, 0.8, Vector3(0, 0.75, -0.6), glass, 6)
-	canopy.scale = Vector3(0.9, 0.7, 2.0)
+	_build_cockpit(glass)
 	for sx in [-1.0, 1.0]:
 		var fn = Lib.prism(root, Vector3(2.6, 2.6, 0.25), Vector3(2.4 * sx, 1.2, 3.2), tint, Vector3(0, PI / 2, 0), 1.0)
 		if sx < 0.0:
@@ -99,6 +98,104 @@ func build(c: Color, is_elite: bool = false) -> void:
 
 
 
+
+
+# 1.1.1 cockpit: a see-through canopy with a seat, instrument panel, side consoles, a stick and
+# the pilot sitting inside. Pilots are .glb busts in res://models/pilots/ (y up, facing +Z,
+# about 3.5 units tall, like the Blender pilot portraits). To add one, drop the .glb in that
+# folder and add its path to PILOTS; pilot_i picks which one this ship carries.
+const PILOTS = ["res://models/pilots/01_naked_mole_rat.glb"]
+const PILOT_SCALE = 0.3
+static var pilot_scenes = {}
+static var canopy_mat: StandardMaterial3D = null
+var pilot_i = 0
+var pilot: Node3D
+
+
+func _build_cockpit(_glass: Material) -> void:
+	var cz = 0.35
+	# canopy glass: tinted, mostly clear, a little glossy
+	if canopy_mat == null:
+		canopy_mat = StandardMaterial3D.new()
+		canopy_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		canopy_mat.albedo_color = Color(0.55, 0.85, 1.0, 0.22)
+		canopy_mat.metallic = 0.2
+		canopy_mat.roughness = 0.05
+		canopy_mat.rim_enabled = true
+		canopy_mat.rim = 0.6
+		canopy_mat.rim_tint = 0.3
+		canopy_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		canopy_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	var canopy = Lib.ball(root, 1.0, Vector3(0, 0.85, cz - 0.15), canopy_mat, 12)
+	canopy.scale = Vector3(0.78, 0.95, 1.75)
+	canopy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# canopy frame: a thin hoop and a spine
+	var frame = Lib.toon(Color(0.2, 0.22, 0.28))
+	var hoop = MeshInstance3D.new()
+	var tm = TorusMesh.new()
+	tm.inner_radius = 0.74
+	tm.outer_radius = 0.82
+	tm.rings = 16
+	tm.ring_segments = 6
+	hoop.mesh = tm
+	hoop.material_override = frame
+	hoop.position = Vector3(0, 0.85, cz - 0.35)
+	hoop.rotation = Vector3(PI / 2, 0, 0)
+	hoop.scale = Vector3(1.0, 1.0, 1.2)
+	root.add_child(hoop)
+	# cockpit tub and floor
+	var tub = Lib.toon(Color(0.14, 0.15, 0.18))
+	Lib.box(root, Vector3(1.2, 0.12, 2.6), Vector3(0, 0.62, cz), tub)
+	for sx in [-1.0, 1.0]:
+		Lib.box(root, Vector3(0.08, 0.45, 2.6), Vector3(0.62 * sx, 0.8, cz), tub)
+	# seat: cushion, tilted back, headrest
+	var seat = Lib.toon(Color(0.35, 0.12, 0.1))
+	Lib.box(root, Vector3(0.82, 0.14, 0.7), Vector3(0, 0.72, cz + 0.55), seat)
+	Lib.box(root, Vector3(0.86, 0.85, 0.16), Vector3(0, 1.1, cz + 0.85), seat, Vector3(0.22, 0, 0))
+	# instrument panel with two screens and rows of lit buttons
+	var panel_rot = Vector3(-0.75, 0, 0)
+	var pnl = Node3D.new()
+	pnl.position = Vector3(0, 1.0, cz - 0.95)
+	pnl.rotation = panel_rot
+	root.add_child(pnl)
+	Lib.box(pnl, Vector3(1.1, 0.5, 0.12), Vector3.ZERO, tub)
+	Lib.box(pnl, Vector3(0.34, 0.24, 0.02), Vector3(-0.27, 0.06, 0.07), Lib.glow(Color(0.2, 1.0, 0.5), 2.0))
+	Lib.box(pnl, Vector3(0.34, 0.24, 0.02), Vector3(0.27, 0.06, 0.07), Lib.glow(Color(0.3, 0.7, 1.0), 2.0))
+	var bcols = [Color(1.0, 0.2, 0.15), Color(1.0, 0.8, 0.2), Color(0.3, 1.0, 0.4), Color(0.3, 0.7, 1.0)]
+	for k in 8:
+		Lib.box(pnl, Vector3(0.07, 0.05, 0.03), Vector3(-0.42 + 0.12 * k, -0.16, 0.07), Lib.glow(bcols[k % 4], 3.0))
+	# side consoles with buttons and a throttle lever
+	for sx in [-1.0, 1.0]:
+		Lib.box(root, Vector3(0.2, 0.14, 1.0), Vector3(0.5 * sx, 0.9, cz + 0.05), tub)
+		for k in 3:
+			Lib.box(root, Vector3(0.06, 0.03, 0.06), Vector3(0.5 * sx, 0.985, cz - 0.3 + 0.22 * k), Lib.glow(bcols[(k + (1 if sx > 0 else 0)) % 4], 3.0))
+	Lib.cyl(root, 0.025, 0.025, 0.3, 6, Vector3(-0.5, 1.1, cz + 0.25), frame, Vector3(-0.4, 0, 0))
+	# flight stick
+	Lib.cyl(root, 0.03, 0.04, 0.42, 6, Vector3(0, 0.88, cz - 0.15), frame, Vector3(-0.25, 0, 0))
+	Lib.ball(root, 0.06, Vector3(0, 1.08, cz - 0.2), Lib.glow(Color(1.0, 0.2, 0.15), 2.0), 6)
+	set_pilot(pilot_i)
+
+
+func set_pilot(i: int) -> void:
+	if root == null:
+		return
+	pilot_i = i
+	if pilot != null:
+		pilot.queue_free()
+		pilot = null
+	if PILOTS.is_empty():
+		return
+	var path: String = PILOTS[posmod(i, PILOTS.size())]
+	if not pilot_scenes.has(path):
+		pilot_scenes[path] = load(path) if ResourceLoader.exists(path) else null
+	var ps = pilot_scenes[path]
+	if ps == null:
+		return
+	pilot = ps.instantiate()
+	pilot.scale = Vector3.ONE * PILOT_SCALE
+	pilot.rotation = Vector3(0, PI, 0)
+	pilot.position = Vector3(0, 0.95, 0.75)
+	root.add_child(pilot)
 
 
 func _afterburner_setup(cool: Color, hot: Color, plume_col: Color) -> void:
