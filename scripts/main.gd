@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.8"
+const VERSION = "1.0.9"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -3495,10 +3495,10 @@ func _host_tick(dt: float) -> void:
 				host_missiles.erase(mid)
 		if game_mode == MODE_BOSS:
 			_host_boss(dt)
+			_host_enemies(dt)
 		else:
 			_host_beam(dt)
 			_host_dm_buffs(dt)
-			_host_enemies(dt)
 		_host_bots(dt)
 		if game_mode == MODE_DM and end_timer < 0.0:
 			var flying = 0
