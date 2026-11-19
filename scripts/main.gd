@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.0.9"
+const VERSION = "1.1.0"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -1221,6 +1221,8 @@ func _host_start() -> void:
 	host_missiles.clear()
 	enemies.clear()
 	rpc("ev_begin", boss_name, _collect_tuning(), game_mode)
+	for id in players:
+		_roll_weapon(id)
 	for id in bots:
 		bots[id] = _ai_state()
 		_bot_place(id, TAU * players[id].col / float(MAX_PLAYERS))
@@ -1348,6 +1350,9 @@ func _place_me(angle: float) -> void:
 
 func _clear_action() -> void:
 	_clear_buffs()
+	for lid in lances:
+		lances[lid].node.queue_free()
+	lances.clear()
 	for sh in shots:
 		sh.n.queue_free()
 	shots.clear()
@@ -1636,6 +1641,7 @@ func _process(dt: float) -> void:
 	_tick_towers(dt)
 	_tick_comm(dt)
 	_tick_ace_beams(dt)
+	_tick_lances(dt)
 	_tick_buffs(dt)
 	_tick_fx(dt)
 	_camera(dt)
@@ -1931,7 +1937,7 @@ func _local_flight(dt: float) -> void:
 		s.position.y = 3.0
 		s.pitch = maxf(s.pitch, 0.3)
 		aim_pitch = maxf(aim_pitch, 0.3)
-		_bump(4)
+		_bump()
 	for sol in boss.solids:
 		var dv = s.position - sol[0]
 		var rr = sol[1] + SHIP_R * 0.6
@@ -1940,7 +1946,7 @@ func _local_flight(dt: float) -> void:
 			s.position = sol[0] + out * (rr + 1.0)
 			s.yaw = atan2(-out.x, -out.z)
 			aim_yaw = s.yaw
-			_bump(20)
+			_bump()
 	for pl in pillars:
 		if s.position.y < pl[2]:
 			var dv2 = Vector2(s.position.x, s.position.z) - pl[0]
@@ -1950,14 +1956,18 @@ func _local_flight(dt: float) -> void:
 				s.position.z = pl[0].y + o2.y * (pl[1] + 4.0)
 				s.yaw = atan2(-o2.x, -o2.y)
 				aim_yaw = s.yaw
-				_bump(20)
+				_bump()
 	s.apply()
 
 
 
 	var firing = _key(KEY_SPACE) or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_joy_button_pressed(0, JOY_BUTTON_A)
 	volley_cd -= dt
-	if firing and volley_left == 0 and volley_cd <= 0.0:
+	var wk = weapons.get(my_id, WPN_CANNON)
+	if wk != WPN_CANNON:
+		volley_left = 0
+		_fire_weapon(s, wk, firing, dt)
+	elif firing and volley_left == 0 and volley_cd <= 0.0:
 		volley_left = VOLLEY_SHOTS
 		volley_t = 0.0
 		volley_cd = VOLLEY_PERIOD * _gun_k(my_id)
@@ -2199,17 +2209,40 @@ func _boosttest_snap() -> String:
 	return ""
 
 
-func _bump(dmg: int) -> void:
+# 1.1.0 collision damage: ramming anything solid (ground, towers, the boss, buildings) knocks
+# half a full shield off. With no shield left it is instant death.
+const RAM_SHIELD_K = 0.5
+
+
+func _bump() -> void:
 	if bump_cd > 0.0:
 		return
-	bump_cd = 0.6
+	bump_cd = 0.8
 	var s = ships.get(my_id)
 	if s != null:
 		_pop(s.position, 4.0, Color(1, 1, 1))
 	if shield_t <= 0.0:
 		if s != null:
 			_my_shield(s.position + s.fwd() * 5.0)
-		_to_host("c_took", [dmg, 0])
+		_to_host("c_ram", [])
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func c_ram() -> void:
+	if is_host:
+		_apply_ram(_sender())
+
+
+func _apply_ram(from: int) -> void:
+	if state != PLAYING or not hostp.has(from) or not players.has(from) or not hostp[from].alive or hostp[from].protect > 0.0:
+		return
+	hostp[from]["since"] = 0.0
+	var pl = players[from]
+	if pl.hp > 0:
+		pl.hp = maxi(0, pl.hp - int(round(SHIELD_MAX * RAM_SHIELD_K)))
+	else:
+		pl.ar = 0
+		_host_kill(from, 0, 0)
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
@@ -2363,7 +2396,23 @@ func _spawn_shot(p: Vector3, dir: Vector3, owner_id: int, rocket: bool = false) 
 		else:
 			mi.material_override = _glow_mat("acebolt", Color(1.0, 0.3, 0.75), 4.0)
 		n = mi
-		if owner_id > ENEMY_BASE and owner_id != 0:
+		var pwk = weapons.get(owner_id, WPN_CANNON) if owner_id > ENEMY_BASE and owner_id != 0 else -1
+		var pw_on = pwk >= 0 and has_buff(owner_id, BUFF_POWER)
+		if pwk == WPN_PDC:
+			# PDC guns: small, fast yellow tracers
+			mi.material_override = _glow_mat("pdc_gun_p" if pw_on else "pdc_gun", Color(0.6, 0.9, 1.0) if pw_on else Color(1.0, 0.85, 0.4), 9.0 if pw_on else 6.0)
+			v = dir.normalized() * PDC_GUN_SPEED
+			life = PDC_GUN_LIFE
+			dmg = int(round(PDC_GUN_DMG * (POWER_DMG_K if pw_on else 1.0)))
+		elif pwk == WPN_TWIN:
+			# twin lasers: the red turret bolts, two at once
+			mi.material_override = _glow_mat("twin_p" if pw_on else "bolt", Color(1.0, 0.55, 0.9) if pw_on else Color(1.0, 0.15, 0.1), 8.0 if pw_on else 5.0)
+			v = dir.normalized() * TWIN_SPEED
+			life = TWIN_LIFE
+			dmg = int(round(TWIN_DMG * (POWER_DMG_K if pw_on else 1.0)))
+			if pw_on:
+				arcs = _make_arcs(mi)
+		if owner_id > ENEMY_BASE and owner_id != 0 and pwk != WPN_PDC and pwk != WPN_TWIN:
 
 			mi.free()
 			n = Node3D.new()
@@ -2395,6 +2444,12 @@ func _spawn_shot(p: Vector3, dir: Vector3, owner_id: int, rocket: bool = false) 
 	Lib.face(n, p, dir)
 	if owner_id == 0:
 		n.scale = Vector3(2.2, 2.2, 1.0)
+	elif not rocket and owner_id > ENEMY_BASE:
+		var swk = weapons.get(owner_id, WPN_CANNON)
+		if swk == WPN_PDC:
+			n.scale = Vector3(0.8, 0.8, 0.55)
+		elif swk == WPN_TWIN:
+			n.scale = Vector3(1.8, 1.8, 1.0)
 
 	if not rocket and (owner_id == 0 or owner_id <= ENEMY_BASE) and not sfx_enemy_lasers.is_empty():
 		_sfx(sfx_enemy_lasers[randi() % sfx_enemy_lasers.size()], -5.0, p)
@@ -3487,6 +3542,7 @@ func _host_tick(dt: float) -> void:
 					players[id].hp = SHIELD_MAX
 					players[id].ar = ARMOR_MAX
 					rpc("ev_respawn", id)
+					_roll_weapon(id)
 					if bots.has(id):
 						_bot_place(id, randf() * TAU)
 		for mid in host_missiles.keys():
@@ -4164,11 +4220,16 @@ func _ai_step(id: int, b: Dictionary, dt: float, enemy: bool) -> void:
 					b.fire = randf_range(3.0, 4.5)
 					rpc("ev_ace_beam", id)
 			elif b.fire <= 0.0:
-				b.fire = 0.26
+				var bw = weapons.get(id, WPN_CANNON)
+				b.fire = 0.087 if bw == WPN_PDC else (0.52 if bw == WPN_TWIN else 0.26)
 				b.side = -b.side
 				var mz = s.position + s.basis * Vector3(2.4 * b.side, 0.0, -2.3)
 				_spawn_shot(mz, dir, id)
 				rpc("bfx_shot", id, mz, dir)
+				if bw == WPN_TWIN:
+					var mz2 = s.position + s.basis * Vector3(-2.4 * b.side, 0.0, -2.3)
+					_spawn_shot(mz2, dir, id)
+					rpc("bfx_shot", id, mz2, dir)
 
 
 
@@ -5231,3 +5292,184 @@ func _home(sh: Dictionary, dt: float) -> void:
 		cur = cur.slerp(want, minf(1.0, turn * dt / ang)).normalized()
 	sh.v = cur * spd
 	Lib.face(sh.n, sh.p, cur)
+
+
+# ---------------------------------------------------------------------------------------------
+# 1.1.0 spawn weapons. Every time a pilot (re)spawns the host rolls one of four guns for them:
+#   CANNON      the old gold pulse volley        9 x 12 dmg every 1.7 s        ~64 dps, bursty
+#   PDC GUNS    point-defence machine guns       4 dmg, 16 rounds/s            ~64 dps, short range
+#   TWIN LASERS the red turret bolts, 2 at once  2 x 12 dmg every 0.38 s       ~63 dps
+#   LASER LANCE the pink aces' charged beam      0.35 s charge, 0.7 s beam, 2.4 s cycle,
+#                                                hits instantly, ~64 dps averaged
+# Bots never roll the lance. Buffs work on all four (rapid fire halves the gaps, overcharge +50%).
+const WPN_CANNON = 0
+const WPN_PDC = 1
+const WPN_TWIN = 2
+const WPN_LANCE = 3
+const WPN_NAMES = ["PULSE CANNON", "PDC GUNS", "TWIN LASERS", "LASER LANCE"]
+const PDC_GUN_GAP = 0.0625
+const PDC_GUN_DMG = 4
+const PDC_GUN_SPEED = 620.0
+const PDC_GUN_LIFE = 0.6
+const TWIN_GAP = 0.38
+const TWIN_DMG = 12
+const TWIN_SPEED = 330.0
+const TWIN_LIFE = 1.4
+const LANCE_CHARGE = 0.35
+const LANCE_FIRE = 0.7
+const LANCE_CYCLE = 2.4
+const LANCE_LEN = 300.0
+const LANCE_DPS = 220.0
+var weapons = {}
+var lances = {}
+var pdc_gun_cd = 0.0
+var pdc_snd_n = 0
+
+
+func _roll_weapon(id: int) -> void:
+	if not is_host or not players.has(id):
+		return
+	var w = randi() % (3 if bots.has(id) else WPN_NAMES.size())
+	rpc("ev_weapon", id, w)
+
+
+@rpc("authority", "call_local", "reliable")
+func ev_weapon(id: int, w: int) -> void:
+	if w < 0 or w >= WPN_NAMES.size():
+		return
+	weapons[id] = w
+	if id == my_id:
+		volley_left = 0
+		volley_cd = 0.0
+		_say("WEAPON: %s" % WPN_NAMES[w])
+
+
+func _fire_weapon(s, wk: int, firing: bool, dt: float) -> void:
+	var b = s.basis
+	var dir = -b.z
+	if wk == WPN_PDC:
+		pdc_gun_cd -= dt
+		if not firing:
+			pdc_gun_cd = maxf(pdc_gun_cd, 0.0)
+			return
+		while pdc_gun_cd <= 0.0:
+			pdc_gun_cd += PDC_GUN_GAP * _gun_k(my_id)
+			fire_side = -fire_side
+			var d = (dir + Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * 0.008).normalized()
+			var mz = s.position + b * Vector3(2.4 * fire_side, 0.0, -2.3)
+			_spawn_shot(mz, d, my_id)
+			_pop(mz + d * 2.0, 1.0, Color(1.0, 0.85, 0.4))
+			rpc("fx_shot", mz, d)
+			pdc_snd_n += 1
+			if pdc_snd_n % 3 == 0:
+				_sfx_pitched(sfx_enemy_lasers, 1.9, -12.0)
+	elif wk == WPN_TWIN:
+		if firing and volley_cd <= 0.0:
+			volley_cd = TWIN_GAP * _gun_k(my_id)
+			var l = s.position + b * Vector3(-2.4, 0.0, -2.3)
+			var r = s.position + b * Vector3(2.4, 0.0, -2.3)
+			_spawn_shot(l, dir, my_id)
+			_spawn_shot(r, dir, my_id)
+			_pop(l + dir * 2.0, 1.6, Color(1.0, 0.3, 0.2))
+			_pop(r + dir * 2.0, 1.6, Color(1.0, 0.3, 0.2))
+			rpc("fx_fire", l, r, dir)
+			_sfx_pitched(sfx_enemy_lasers, 1.0, -6.0)
+	elif wk == WPN_LANCE:
+		if firing and volley_cd <= 0.0 and not lances.has(my_id):
+			volley_cd = LANCE_CYCLE * _gun_k(my_id)
+			_start_lance(my_id)
+			rpc("fx_lance")
+
+
+func _sfx_pitched(list: Array, pitch: float, db: float) -> void:
+	if list.is_empty():
+		return
+	var p = AudioStreamPlayer.new()
+	p.stream = list[randi() % list.size()]
+	p.pitch_scale = pitch
+	p.volume_db = db
+	add_child(p)
+	p.play()
+	p.finished.connect(p.queue_free)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func fx_lance() -> void:
+	if state == PLAYING:
+		_start_lance(multiplayer.get_remote_sender_id())
+
+
+func _start_lance(id: int) -> void:
+	if state != PLAYING or lances.has(id) or not ships.has(id):
+		return
+	var node = AceBeam.new()
+	add_child(node)
+	if sfx_ace_beam == null:
+		sfx_ace_beam = _load_sound("res://sounds/ace_beam.ogg")
+	node.build(sfx_ace_beam if sfx_ace_beam != null else sfx_beam)
+	lances[id] = {"t": 0.0, "node": node, "acc": 0.0}
+
+
+# How far the lance reaches before it hits something it would damage, or a wall.
+func _lance_len(owner: int, nose: Vector3, fwd: Vector3) -> float:
+	var best = _beam_stop(nose, fwd, LANCE_LEN)
+	var dm = game_mode == MODE_DM
+	for oid in ships:
+		if dm:
+			if oid == owner or oid <= ENEMY_BASE or not players.has(oid):
+				continue
+		elif oid > ENEMY_BASE:
+			continue
+		var o = ships[oid]
+		if not o.alive or not (o.has_net or oid == my_id):
+			continue
+		var along = (o.position - nose).dot(fwd)
+		if along < 0.0 or along > best + 6.0:
+			continue
+		if (nose + fwd * along).distance_to(o.position) < SHIP_R * (2.0 if oid <= ENEMY_BASE else 1.0):
+			best = along
+	if not dm:
+		for i in boss.parts.size():
+			if (alive_mask & (1 << i)) == 0:
+				continue
+			var pt = boss.parts[i]
+			var al = (pt.pos - nose).dot(fwd)
+			if al < 0.0 or al > best + 6.0:
+				continue
+			if (nose + fwd * al).distance_to(pt.pos) < pt.r:
+				best = maxf(0.0, al - pt.r * 0.5)
+	return best
+
+
+func _tick_lances(dt: float) -> void:
+	for id in lances.keys():
+		var bm = lances[id]
+		var s = ships.get(id)
+		bm.t += dt
+		if s == null or not s.alive or state != PLAYING or bm.t > LANCE_CHARGE + LANCE_FIRE:
+			bm.node.queue_free()
+			lances.erase(id)
+			continue
+		var fwd = (-s.basis.z).normalized()
+		var nose = s.position + fwd * 4.0
+		bm.node.global_transform = Transform3D(Basis.looking_at(fwd, Vector3.UP if absf(fwd.y) < 0.98 else Vector3.RIGHT), nose)
+		if bm.t < LANCE_CHARGE:
+			bm.node.show_charge(bm.t / LANCE_CHARGE, dt)
+			continue
+		var best = _lance_len(id, nose, fwd)
+		bm.node.show_fire(1.0 - (bm.t - LANCE_CHARGE) / LANCE_FIRE, best, best < LANCE_LEN - 0.5, dt)
+		if id != my_id or best >= LANCE_LEN - 0.5:
+			continue
+		bm.acc += LANCE_DPS * (POWER_DMG_K if has_buff(id, BUFF_POWER) else 1.0) * dt
+		if bm.acc < 6.0:
+			continue
+		var n = int(bm.acc)
+		bm.acc -= n
+		var p0 = nose + fwd * maxf(0.0, best - 12.0)
+		var p1 = nose + fwd * (best + 4.0)
+		if not _my_shot_hits(p0, p1, n, id):
+			var hk = _hit_kind(p0, p1)
+			if hk == 1:
+				_to_host("c_hit_body", [n])
+			elif hk == 2 and last_tower >= 0:
+				_to_host("c_hit_tower", [last_tower, n])

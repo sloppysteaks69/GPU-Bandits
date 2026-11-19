@@ -422,6 +422,8 @@ func _draw_play(w: float, h: float, cx: float) -> void:
 			var fl = 0.8 + 0.2 * sin(m.t * 30.0)
 			draw_rect(Rect2(Vector2(40, h - 70), Vector2(420 * clampf(mine.hp / float(m.SHIELD_MAX) - 1.0, 0.0, 1.0), 28)), Color(0.75, 0.6, 1.0, fl))
 		bar(Vector2(40, h - 140), 420, 20, mine.ar / float(m.ARMOR_MAX), Color(0.95, 0.6, 0.2) if mine.ar > m.ARMOR_MAX * 0.3 else Color(1.0, 0.25, 0.15), "ARMOR")
+	if mine != null and m.weapons.has(m.my_id):
+		txt(m.WPN_NAMES[m.weapons[m.my_id]], Vector2(40, h - 196), 28, Color(1, 0.85, 0.3))
 	_draw_wings(Vector2(w - 460, h - 176))
 	bar(Vector2(w - 460, h - 70), 420, 28, m.boost, Color(1, 0.4, 0.2) if m.overheated else Color(1, 0.8, 0.2), "BOOST")
 	txt("SPEED %d%%" % int(round(100.0 * m.speed / maxf(m.BASE_SPEED, 0.01))), Vector2(w - 120, h - 84), 24, Color(0.6, 0.85, 1.0) if me != null and me.boosting else Color.WHITE, true)
