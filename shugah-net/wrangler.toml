@@ -39,3 +39,11 @@ simple = { limit = 20, period = 60 }
 #   TURN_KEY_ID      Cloudflare Realtime TURN key id
 #   TURN_API_TOKEN   Cloudflare Realtime TURN API token
 #   APP_KEY          optional: if set, clients must send it in the X-Shugah-Key header
+
+# Spending guard: check TURN usage every 10 minutes (see README "Spending guard").
+[triggers]
+crons = ["*/10 * * * *"]
+
+[vars]
+TURN_CAP_GB = "900"   # stop handing out TURN credentials at this many GB per billing month
+BILLING_DAY = "1"     # day of the month your Cloudflare billing month starts

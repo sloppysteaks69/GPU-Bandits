@@ -49,6 +49,23 @@ TURN usage is billed separately by Cloudflare Realtime, and its free allowance i
    - To build it in instead, set `SHUGAH_URL` near the top of the Shugah Net section in `scripts/main.gd`.
    - If you set an `APP_KEY`, also set it in `shugah_net.gd` (`app_key`).
 
+## Spending guard (stay inside the free 1,000 GB)
+
+Cloudflare Realtime includes 1,000 GB of TURN traffic a month, then bills $0.05/GB. The Worker can't see TURN traffic itself, so every 10 minutes (cron trigger) it asks Cloudflare's GraphQL analytics (`callsTurnUsageAdaptiveGroups`) how many bytes the whole account used this billing month, counting both directions so it can only over-count.
+
+- At `TURN_CAP_GB` (default **900**) it stops handing out TURN credentials until the next billing month. New games can't start; the game says Shugah Net is resting and LAN still works.
+- If it can't read usage for 2 hours (bad token, API down) it also stops, so it never runs blind.
+- `/health` shows `used_gb`, `cap_gb`, the billing month and when it last checked.
+
+Set up (one time):
+1. Create an API token: **My Profile → API Tokens → Create Token → Custom token**, permission **Account → Account Analytics → Read**, limited to your account. Copy it.
+2. Copy your **Account ID** (Workers & Pages overview, right-hand side).
+3. `npx wrangler secret put CF_ACCOUNT_ID` and `npx wrangler secret put CF_ANALYTICS_TOKEN`
+4. If your billing month doesn't start on the 1st, set `BILLING_DAY` in `wrangler.toml`.
+5. `npx wrangler deploy`, then open `/health` and check `"guard":"on"` with a recent `checked` time.
+
+Limits: analytics lag a few minutes, and games that already have credentials keep playing for up to 4 hours after the cap trips, which is why the cap sits 100 GB below the allowance.
+
 ## Test locally
 
 ```

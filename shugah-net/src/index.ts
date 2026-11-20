@@ -3,6 +3,13 @@
 //   POST /api/turn-credentials   -> short-lived Cloudflare Realtime TURN ice servers (4 h)
 //   GET  /api/lobby/:code        -> WebSocket to that lobby's Durable Object (LobbyDO)
 //   GET  /api/games              -> list of open games (one Directory DO, updated by hosts)
+//   GET  /health                 -> ok + this billing month's TURN usage against the cap
+//
+// Spending guard: every 10 minutes (cron) the Worker asks Cloudflare's GraphQL analytics how
+// many TURN bytes the whole account used since the billing month started. At TURN_CAP_GB
+// (default 900 of the free 1,000 GB) it stops handing out TURN credentials until the next
+// billing month, so no new game can start. If the usage check keeps failing for 2 hours it
+// also stops (fails closed), because it can no longer see how much is used.
 //
 // The Worker never carries gameplay. A lobby DO only matches players and relays a few
 // signaling messages (offer / answer / relay ICE candidates) per join, using the WebSocket
@@ -17,6 +24,10 @@ export interface Env {
   APP_KEY?: string;
   TURN_LIMIT?: RateLimit;
   LOBBY_LIMIT?: RateLimit;
+  CF_ACCOUNT_ID?: string;       // secret: the account id (dashboard sidebar / Workers overview)
+  CF_ANALYTICS_TOKEN?: string;  // secret: API token with only "Account Analytics: Read"
+  TURN_CAP_GB?: string;         // var: stop at this many GB a billing month (default 900)
+  BILLING_DAY?: string;         // var: day of month the Cloudflare billing month starts (1-28)
 }
 
 interface RateLimit {
@@ -27,6 +38,9 @@ const CODE_RE = /^[A-Z2-9]{6}$/;
 const MAX_PLAYERS = 15; // 1 host + 14 clients
 const TURN_TTL = 14400;
 const MAX_MSG = 16 * 1024;
+const GB = 1e9;
+const CHECK_EVERY_MS = 10 * 60 * 1000;   // refresh usage on demand if older than this
+const STALE_CLOSE_MS = 2 * 60 * 60 * 1000; // no good reading for this long -> stop
 
 function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -64,6 +78,8 @@ export default {
       if (!(req.headers.get("x-shugah-client") ?? "").startsWith("gpu-bandits/"))
         return json({ error: "forbidden" }, 403);
       if (await limited(env.TURN_LIMIT, clientIp(req))) return json({ error: "slow_down" }, 429, { "retry-after": "60" });
+      const u = await usage(env, "/usage");
+      if (!u.open) return json({ error: u.reason, reopens: u.reopens }, 503);
       return turnCredentials(env);
     }
 
@@ -86,10 +102,67 @@ export default {
       return dir.fetch("https://dir/list");
     }
 
-    if (url.pathname === "/" || url.pathname === "/health") return json({ ok: true, service: "shugah-net" });
+    if (url.pathname === "/" || url.pathname === "/health") {
+      const u = await usage(env, "/usage");
+      return json({ ok: true, service: "shugah-net", turn: u });
+    }
     return json({ error: "not_found" }, 404);
   },
+
+  async scheduled(_ev: unknown, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }): Promise<void> {
+    ctx.waitUntil(usage(env, "/usage/check"));
+  },
 };
+
+interface Usage {
+  open: boolean;
+  reason?: string;
+  guard: "on" | "off";
+  used_gb?: number;
+  cap_gb?: number;
+  since?: string;
+  reopens?: string;
+  checked?: string;
+}
+
+async function usage(env: Env, op: string): Promise<Usage> {
+  const dir = env.DIRECTORY.get(env.DIRECTORY.idFromName("directory"));
+  const r = await dir.fetch("https://dir" + op, { method: "POST" });
+  return (await r.json()) as Usage;
+}
+
+// The billing month that contains `now`, as [start, next start] dates (UTC).
+function billingMonth(now: Date, day: number): [Date, Date] {
+  let y = now.getUTCFullYear();
+  let m = now.getUTCMonth();
+  if (now.getUTCDate() < day) m -= 1;
+  const start = new Date(Date.UTC(y, m, day));
+  const next = new Date(Date.UTC(y, m + 1, day));
+  return [start, next];
+}
+
+const ymd = (d: Date) => d.toISOString().slice(0, 10);
+
+// Account-wide TURN bytes (both directions, so it can only over-count) since `from`.
+async function turnBytesSince(env: Env, from: Date, to: Date): Promise<number> {
+  const acct = String(env.CF_ACCOUNT_ID).replace(/[^0-9a-fA-F]/g, "");
+  const q = `query { viewer { accounts(filter: { accountTag: "${acct}" }) {
+    callsTurnUsageAdaptiveGroups(limit: 1, filter: { date_geq: "${ymd(from)}", date_leq: "${ymd(to)}" }) {
+      sum { egressBytes ingressBytes } } } } }`;
+  const r = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ query: q }),
+  });
+  if (!r.ok) throw new Error("graphql http " + r.status);
+  const d: any = await r.json();
+  if (d.errors && d.errors.length) throw new Error("graphql " + JSON.stringify(d.errors).slice(0, 300));
+  const groups = d?.data?.viewer?.accounts?.[0]?.callsTurnUsageAdaptiveGroups;
+  if (!Array.isArray(groups)) throw new Error("graphql: no data");
+  let total = 0;
+  for (const g of groups) total += Number(g?.sum?.egressBytes ?? 0) + Number(g?.sum?.ingressBytes ?? 0);
+  return total;
+}
 
 async function turnCredentials(env: Env): Promise<Response> {
   if (!env.TURN_KEY_ID || !env.TURN_API_TOKEN) return json({ error: "turn_not_configured" }, 500);
@@ -357,16 +430,78 @@ export class Directory {
   ctx: DurableObjectState;
   sql: SqlStorage;
 
-  constructor(ctx: DurableObjectState, _env: Env) {
+  env: Env;
+
+  constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
+    this.env = env;
     this.sql = ctx.storage.sql;
     this.sql.exec(
       "CREATE TABLE IF NOT EXISTS games (code TEXT PRIMARY KEY, name TEXT, mode TEXT, players INTEGER, max INTEGER, playing INTEGER, ver TEXT, updated INTEGER)",
     );
+    this.sql.exec("CREATE TABLE IF NOT EXISTS usage (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+  }
+
+  uget(k: string): string | null {
+    const rows = this.sql.exec("SELECT v FROM usage WHERE k = ?", k).toArray();
+    return rows.length ? String(rows[0].v) : null;
+  }
+
+  uset(k: string, v: string): void {
+    this.sql.exec("INSERT INTO usage (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", k, v);
+  }
+
+  // Spending guard state. force = run the analytics query now (cron); otherwise only when the
+  // last reading is older than CHECK_EVERY_MS.
+  async usage(force: boolean): Promise<Usage> {
+    const env = this.env;
+    if (!env.CF_ACCOUNT_ID || !env.CF_ANALYTICS_TOKEN) return { open: true, guard: "off" };
+    const capGb = Math.max(1, Number(env.TURN_CAP_GB) || 900);
+    const day = Math.min(28, Math.max(1, Math.floor(Number(env.BILLING_DAY) || 1)));
+    const now = new Date();
+    const [start, next] = billingMonth(now, day);
+    const period = ymd(start);
+    if (this.uget("period") !== period) {
+      // new billing month: forget last month's numbers
+      this.uset("period", period);
+      this.uset("used", "0");
+      this.uset("good_at", "0");
+    }
+    const goodAt = Number(this.uget("good_at") ?? 0);
+    const tryAt = Number(this.uget("try_at") ?? 0);
+    if (force || (Date.now() - goodAt > CHECK_EVERY_MS && Date.now() - tryAt > 60_000)) {
+      this.uset("try_at", String(Date.now()));
+      try {
+        const used = await turnBytesSince(env, start, now);
+        this.uset("used", String(used));
+        this.uset("good_at", String(Date.now()));
+        this.uset("err", "");
+      } catch (e) {
+        this.uset("err", String(e).slice(0, 300));
+      }
+    }
+    const used = Number(this.uget("used") ?? 0);
+    const good = Number(this.uget("good_at") ?? 0);
+    const base: Usage = {
+      open: true,
+      guard: "on",
+      used_gb: Math.round((used / GB) * 100) / 100,
+      cap_gb: capGb,
+      since: period,
+      reopens: ymd(next),
+      checked: good ? new Date(good).toISOString() : "never",
+    };
+    if (used >= capGb * GB) return { ...base, open: false, reason: "monthly_cap" };
+    if (Date.now() - good > STALE_CLOSE_MS) {
+      const err = this.uget("err") ?? "";
+      return { ...base, open: false, reason: "usage_unknown", ...(err ? { error: err } : {}) } as Usage;
+    }
+    return base;
   }
 
   async fetch(req: Request): Promise<Response> {
     const op = new URL(req.url).pathname;
+    if (op === "/usage" || op === "/usage/check") return json(await this.usage(op === "/usage/check"));
     if (op === "/list") {
       this.sql.exec("DELETE FROM games WHERE updated < ?", Date.now() - STALE_MS);
       const games = this.sql

@@ -198,6 +198,15 @@ func _get_turn() -> void:
 func _on_turn(result: int, status: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	if mode == "":
 		return
+	if result == HTTPRequest.RESULT_SUCCESS and status == 503:
+		# 1.2.5 spending guard: the server stops before the free monthly relay allowance runs out
+		var e = JSON.parse_string(body.get_string_from_utf8())
+		if typeof(e) == TYPE_DICTIONARY and str(e.get("error", "")) == "monthly_cap":
+			_fail("Shugah Net is resting until %s: this month's free relay allowance is used up. LAN games still work." % str(e.get("reopens", "next month")))
+			return
+		if typeof(e) == TYPE_DICTIONARY and str(e.get("error", "")) == "usage_unknown":
+			_fail("Shugah Net is paused: it can't check this month's relay usage right now. Try again later.")
+			return
 	if result != HTTPRequest.RESULT_SUCCESS or status != 200:
 		_fail("Shugah Net is not answering (%s)." % ("HTTP %d" % status if result == HTTPRequest.RESULT_SUCCESS else "no connection, code %d" % result))
 		return
