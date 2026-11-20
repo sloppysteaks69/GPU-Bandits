@@ -17,7 +17,7 @@ const FLOOR = preload("res://shaders/floor.gdshader")
 # GPU Bandits standalone: its own menu (host on a port, join by IP and port), no match clock,
 # two modes: BOSS HUNT (co-op, highest score wins) and DEATHMATCH (3 lives, last pilot flying wins).
 # Forked from the LAN launcher minigame 0.6.8.
-const VERSION = "1.2.3"
+const VERSION = "1.2.4"
 const DISCOVERY_PORT = 27017
 const BEACON = "GPU_BANDITS_SA1"
 const MAX_PLAYERS = 16
@@ -187,7 +187,7 @@ const COLORS = [
 var state = MENU
 var is_host = false
 var port = DEFAULT_PORT
-var my_name = "Pilot"
+var my_name = "Player"
 var my_id = 1
 var game_mode = MODE_BOSS
 var match_t = 0.0
@@ -411,9 +411,7 @@ var mat_cache = {}
 
 func _ready() -> void:
 	randomize()
-	var env_name = OS.get_environment("USERNAME")
-	if env_name != "":
-		my_name = env_name.left(16)
+	# 1.2.4: no longer defaults to the Windows account name; fresh installs fly as "Player"
 	_load_config()
 	_parse_args()
 	_build_world()
@@ -5302,7 +5300,34 @@ func _drop_buff(pos: Vector3) -> void:
 
 func _spawn_buff(pos: Vector3) -> void:
 	buff_seq += 1
-	rpc("ev_buff_spawn", buff_seq, randi() % BUFF_NAMES.size(), Vector3(pos.x, maxf(pos.y, 16.0), pos.z))
+	pos = _buff_clear_spot(Vector3(pos.x, maxf(pos.y, 16.0), pos.z))
+	rpc("ev_buff_spawn", buff_seq, randi() % BUFF_NAMES.size(), pos)
+
+
+# 1.2.4: a gun on the datacenter roof sits inside the roof's collision bubble, so its buff
+# floated where no ship could reach. Lift a buff out of every solid box and bubble first.
+const BUFF_CLEAR = 7.0
+func _buff_clear_spot(pos: Vector3) -> Vector3:
+	for _pass in 3:
+		for b in boss.static_boxes:
+			var inv: Transform3D = b[0]
+			var half: Vector3 = b[1]
+			var lp = inv * pos
+			if absf(lp.x) < half.x + BUFF_CLEAR and absf(lp.y) < half.y + BUFF_CLEAR and absf(lp.z) < half.z + BUFF_CLEAR:
+				lp.y = half.y + BUFF_CLEAR + 2.0
+				pos = inv.affine_inverse() * lp
+		for so in boss.static_solids:
+			var c: Vector3 = so[0]
+			var r: float = so[1] + BUFF_CLEAR
+			var d = pos - c
+			if d.length() < r:
+				# out through the top half so it ends up above the roof, not inside a wall
+				var dir = Vector3(d.x, maxf(d.y, 0.0), d.z)
+				if dir.length() < 0.5:
+					dir = Vector3.UP
+				dir = (dir.normalized() + Vector3.UP * 0.6).normalized()
+				pos = c + dir * (r + 2.0)
+	return pos
 
 
 @rpc("authority", "call_local", "reliable")
@@ -5471,6 +5496,17 @@ func _swarm_targets(owner_id: int) -> Array:
 	return out
 
 
+# 1.2.4: homing missiles only chase what is in the half-space ahead of their nose (a 180 degree
+# cone), so they never U-turn after something behind them.
+func _front_targets(owner_id: int, from: Vector3, fwd: Vector3) -> Array:
+	var out = []
+	for c in _swarm_targets(owner_id):
+		var tp = _tgt_pos(c)
+		if tp != null and (tp - from).dot(fwd) > 0.0:
+			out.append(c)
+	return out
+
+
 func _tgt_pos(tgt):
 	if tgt == null:
 		return null
@@ -5485,8 +5521,8 @@ func _tgt_pos(tgt):
 
 
 func _swarm_split(sh: Dictionary) -> void:
-	var cands = _swarm_targets(sh.owner)
 	var from: Vector3 = sh.p
+	var cands = _front_targets(sh.owner, from, sh.v.normalized())
 	cands.sort_custom(func(a, b): return _tgt_pos(a).distance_to(from) < _tgt_pos(b).distance_to(from))
 	_pop(sh.p, 6.0, Color(1.0, 0.6, 0.2))
 	var fwd = sh.v.normalized()
@@ -5505,9 +5541,12 @@ func _swarm_split(sh: Dictionary) -> void:
 
 
 func _home(sh: Dictionary, dt: float) -> void:
-	if _tgt_pos(sh.tgt) == null:
+	var tp0 = _tgt_pos(sh.tgt)
+	if tp0 != null and (tp0 - sh.p).dot(sh.v) <= 0.0:
+		tp0 = null   # flew past it: drop it rather than turning round
+	if tp0 == null:
 		sh.tgt = null
-		var cands = _swarm_targets(sh.owner)
+		var cands = _front_targets(sh.owner, sh.p, sh.v.normalized())
 		if sh.mini and cands.size() > 0:
 			sh.tgt = cands[randi() % cands.size()]
 		elif sh.swarm and cands.size() > 0:
